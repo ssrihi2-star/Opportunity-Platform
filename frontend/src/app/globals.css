@@ -1,0 +1,80 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Palette roles. Light values are the default; dark is a *selected* set of
+   steps for the dark surface, not an automatic inversion. */
+:root {
+  color-scheme: light;
+  --surface-1: #fcfcfb;
+  --plane: #f9f9f7;
+  --text-primary: #0b0b0b;
+  --text-secondary: #52514e;
+  --text-muted: #898781;
+  --gridline: #e1e0d9;
+  --baseline: #c3c2b7;
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  --status-good: #0ca30c;
+  --status-warning: #fab219;
+  --status-serious: #ec835a;
+  --status-critical: #d03b3b;
+  --border-ring: rgba(11, 11, 11, 0.1);
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --surface-1: #1a1a19;
+  --plane: #0d0d0d;
+  --text-primary: #ffffff;
+  --text-secondary: #c3c2b7;
+  --text-muted: #898781;
+  --gridline: #2c2c2a;
+  --baseline: #383835;
+  --series-1: #3987e5;
+  --series-2: #d95926;
+  --border-ring: rgba(255, 255, 255, 0.1);
+}
+
+html,
+body {
+  background: var(--plane);
+  color: var(--text-primary);
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+.card {
+  background: var(--surface-1);
+  border: 1px solid var(--border-ring);
+  border-radius: 10px;
+}
+
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+.field {
+  background: transparent;
+  border: 1px solid var(--border-ring);
+  border-radius: 6px;
+  padding: 0.375rem 0.5rem;
+}
+
+.btn {
+  border-radius: 6px;
+  padding: 0.375rem 0.75rem;
+  background: var(--series-1);
+  color: #fff;
+}
+
+.btn:disabled {
+  opacity: 0.5;
+}
+
+.btn-ghost {
+  border-radius: 6px;
+  padding: 0.375rem 0.75rem;
+  border: 1px solid var(--border-ring);
+  background: transparent;
+  color: var(--text-primary);
+}

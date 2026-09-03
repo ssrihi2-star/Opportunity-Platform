@@ -1,0 +1,202 @@
+{
+  "formula_version": "1.0.0",
+  "cases": [
+    {
+      "name": "strong_technology",
+      "input": {
+        "category": "technology",
+        "adoption_growth_pcts": [
+          60.0,
+          80.0
+        ],
+        "acceleration_pp": 30.0,
+        "market_size_usd": 2000000000,
+        "source_reliabilities": [
+          0.8,
+          0.9,
+          0.7
+        ],
+        "independent_source_count": 3,
+        "dominant_source_share": 0.4,
+        "signal_types": [
+          "github_contributors",
+          "job_posting_growth",
+          "package_downloads"
+        ],
+        "accessibility": "buildable_solo",
+        "liquidity": "not_applicable",
+        "capital_required_usd": 5000,
+        "user_capital_max_usd": 15000,
+        "defensibility_markers": [
+          "network_effect",
+          "proprietary_data"
+        ],
+        "catalyst_dated": true,
+        "catalyst_has_evidence": true,
+        "satisfied_evidence_fields": [
+          "adoption_metric",
+          "developer_activity",
+          "who_is_building",
+          "timeline"
+        ],
+        "cross_source_agreement": 0.8,
+        "newest_evidence_age_days": 3,
+        "risk_flags": []
+      },
+      "expected": {
+        "raw_score": 72.92,
+        "penalty_total": 0,
+        "adjusted_score": 72.92,
+        "confidence": 0.88,
+        "evidence_completeness": 1.0,
+        "risk_level": "low"
+      }
+    },
+    {
+      "name": "thin_evidence_import",
+      "input": {
+        "category": "import_distribution",
+        "adoption_growth_pcts": [
+          15.0
+        ],
+        "acceleration_pp": 2.0,
+        "market_size_usd": null,
+        "source_reliabilities": [
+          0.5
+        ],
+        "independent_source_count": 1,
+        "dominant_source_share": 1.0,
+        "signal_types": [
+          "import_growth"
+        ],
+        "accessibility": "importable",
+        "liquidity": "low",
+        "capital_required_usd": 8000,
+        "user_capital_max_usd": 15000,
+        "satisfied_evidence_fields": [
+          "demand_evidence"
+        ],
+        "cross_source_agreement": 0.1,
+        "newest_evidence_age_days": 45,
+        "risk_flags": []
+      },
+      "expected": {
+        "raw_score": 11.04,
+        "penalty_total": 18.0,
+        "adjusted_score": 0.0,
+        "confidence": 0.3513,
+        "evidence_completeness": 0.2,
+        "risk_level": "medium"
+      }
+    },
+    {
+      "name": "hyped_crypto",
+      "input": {
+        "category": "public_investment",
+        "adoption_growth_pcts": [
+          400.0
+        ],
+        "acceleration_pp": 90.0,
+        "market_size_usd": 50000000,
+        "source_reliabilities": [
+          0.4,
+          0.35
+        ],
+        "independent_source_count": 2,
+        "dominant_source_share": 0.8,
+        "signal_types": [
+          "price_momentum",
+          "trading_volume_anomaly",
+          "social_discussion_growth"
+        ],
+        "accessibility": "publicly_tradable",
+        "liquidity": "low",
+        "capital_required_usd": 1000,
+        "user_capital_max_usd": 15000,
+        "satisfied_evidence_fields": [
+          "valuation"
+        ],
+        "cross_source_agreement": 0.3,
+        "newest_evidence_age_days": 1,
+        "manipulation_probability": 0.7,
+        "is_crypto": true,
+        "risk_flags": [
+          {
+            "code": "anonymous_founders",
+            "severity": "high",
+            "rationale": "No named team",
+            "evidence_ids": []
+          },
+          {
+            "code": "thin_liquidity",
+            "severity": "high",
+            "rationale": "ADV under floor",
+            "evidence_ids": []
+          }
+        ]
+      },
+      "expected": {
+        "raw_score": 49.72,
+        "penalty_total": 55.5,
+        "adjusted_score": 0.0,
+        "confidence": 0.41,
+        "evidence_completeness": 0.2,
+        "risk_level": "very_high"
+      }
+    },
+    {
+      "name": "solid_business",
+      "input": {
+        "category": "business",
+        "adoption_growth_pcts": [
+          35.0,
+          40.0
+        ],
+        "acceleration_pp": 12.0,
+        "market_size_usd": 120000000,
+        "source_reliabilities": [
+          0.7,
+          0.75
+        ],
+        "independent_source_count": 2,
+        "dominant_source_share": 0.55,
+        "signal_types": [
+          "unmet_need_mentions",
+          "job_posting_growth",
+          "customer_complaint_frequency"
+        ],
+        "accessibility": "buildable_solo",
+        "liquidity": "not_applicable",
+        "capital_required_usd": 2000,
+        "user_capital_max_usd": 15000,
+        "defensibility_markers": [
+          "switching_cost"
+        ],
+        "catalyst_dated": false,
+        "satisfied_evidence_fields": [
+          "problem_evidence",
+          "existing_solutions",
+          "market_size"
+        ],
+        "cross_source_agreement": 0.6,
+        "newest_evidence_age_days": 10,
+        "risk_flags": [
+          {
+            "code": "dominant_incumbent",
+            "severity": "medium",
+            "rationale": "Two funded rivals",
+            "evidence_ids": []
+          }
+        ]
+      },
+      "expected": {
+        "raw_score": 39.09,
+        "penalty_total": 6.0,
+        "adjusted_score": 33.09,
+        "confidence": 0.7046,
+        "evidence_completeness": 0.6,
+        "risk_level": "medium"
+      }
+    }
+  ]
+}

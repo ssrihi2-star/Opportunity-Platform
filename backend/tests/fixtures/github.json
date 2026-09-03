@@ -1,0 +1,32 @@
+{
+  "https://api.github.com/repos/electric-sql/electric": {
+    "status": 200,
+    "headers": {
+      "ETag": "W/\"repo-etag-1\"",
+      "Content-Type": "application/json"
+    },
+    "body": "{\"id\": 1, \"full_name\": \"electric-sql/electric\", \"html_url\": \"https://github.com/electric-sql/electric\", \"stargazers_count\": 7421, \"forks_count\": 312, \"open_issues_count\": 88, \"subscribers_count\": 64, \"language\": \"Elixir\"}"
+  },
+  "https://api.github.com/repos/electric-sql/electric/stats/commit_activity": {
+    "status": 200,
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "body": "[{\"week\": 1783382400, \"total\": 44, \"days\": [0, 0, 0, 0, 0, 0, 0]}, {\"week\": 1783987200, \"total\": 41, \"days\": [0, 0, 0, 0, 0, 0, 0]}, {\"week\": 1784592000, \"total\": 38, \"days\": [0, 0, 0, 0, 0, 0, 0]}, {\"week\": 1785196800, \"total\": 35, \"days\": [0, 0, 0, 0, 0, 0, 0]}, {\"week\": 1785801600, \"total\": 32, \"days\": [0, 0, 0, 0, 0, 0, 0]}, {\"week\": 1786406400, \"total\": 29, \"days\": [0, 0, 0, 0, 0, 0, 0]}, {\"week\": 1787011200, \"total\": 26, \"days\": [0, 0, 0, 0, 0, 0, 0]}, {\"week\": 1787616000, \"total\": 23, \"days\": [0, 0, 0, 0, 0, 0, 0]}]"
+  },
+  "https://api.github.com/repos/does-not/exist": {
+    "status": 404,
+    "headers": {},
+    "body": "{\"message\": \"Not Found\"}"
+  },
+  "https://api.github.com/repos/does-not/exist/stats/commit_activity": {
+    "status": 404,
+    "headers": {},
+    "body": "{\"message\": \"Not Found\"}"
+  },
+  "https://api.github.com/rate_limit": {
+    "status": 200,
+    "headers": {},
+    "body": "{\"resources\": {\"core\": {\"limit\": 5000, \"remaining\": 4987}}}"
+  }
+}

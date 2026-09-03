@@ -1,0 +1,128 @@
+"""Application settings. Everything comes from the environment; nothing is hardcoded."""
+
+from __future__ import annotations
+
+import secrets
+from functools import lru_cache
+from typing import Literal
+
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore", case_sensitive=True)
+
+    # --- app -------------------------------------------------------------
+    APP_NAME: str = "Opportunity Intelligence System"
+    ENV: Literal["dev", "test", "prod"] = "dev"
+    DEBUG: bool = False
+    API_V1_PREFIX: str = "/api/v1"
+    LOG_LEVEL: str = "INFO"
+
+    # --- security --------------------------------------------------------
+    SECRET_KEY: str = Field(default="")
+    SECRET_ENCRYPTION_KEY: str = Field(default="")
+    ACCESS_TOKEN_MINUTES: int = 15
+    REFRESH_TOKEN_DAYS: int = 14
+    COOKIE_SECURE: bool = False
+    # A comma-separated string, not list[str]: pydantic-settings JSON-parses complex
+    # env values before any validator runs, so a plain "a,b" would raise at startup.
+    CORS_ORIGINS: str = "http://localhost:3000"
+    RATE_LIMIT_PER_MINUTE: int = 240
+    LOGIN_RATE_LIMIT_PER_MINUTE: int = 10
+
+    # --- database / cache ------------------------------------------------
+    DATABASE_URL: str = "postgresql+asyncpg://ois:ois@postgres:5432/ois"
+    REDIS_URL: str = "redis://redis:6379/0"
+    DB_ECHO: bool = False
+
+    # --- bootstrap admin -------------------------------------------------
+    ADMIN_EMAIL: str = "admin@example.com"
+    ADMIN_PASSWORD: str = ""
+    SEED_DEMO_DATA: bool = True
+
+    # --- ingestion -------------------------------------------------------
+    SOURCE_RUN_STALE_MINUTES: int = 60
+    MAX_RECORDS_PER_RUN: int = 5000
+    HTTP_TIMEOUT_SECONDS: float = 30.0
+    HTTP_CACHE_TTL_SECONDS: int = 900
+    ROBOTS_CACHE_TTL_SECONDS: int = 86400
+    USER_AGENT: str = "OpportunityIntelligenceSystem/0.2 (research; +https://example.invalid/ois)"
+    CONTACT_EMAIL: str = "ois-operator@example.invalid"
+
+    # --- opportunity gate (see docs/scoring-methodology.md) --------------
+    MIN_SIGNAL_TYPES: int = 3
+    MIN_INDEPENDENT_SOURCES: int = 2
+    MIN_CONFIDENCE: float = 0.50
+    MAX_EVIDENCE_AGE_DAYS: int = 30
+    MIN_RAW_SCORE: int = 30
+
+    # --- AI --------------------------------------------------------------
+    AI_PROVIDER: Literal["echo", "openai", "anthropic", "gemini", "local"] = "echo"
+    AI_MODEL_SMALL: str = "small"
+    AI_MODEL_LARGE: str = "large"
+    AI_DAILY_BUDGET_USD: float = 2.0
+    AI_MONTHLY_BUDGET_USD: float = 40.0
+    AI_SHORTLIST_SIZE: int = 20
+    MIN_CITATION_DENSITY: float = 0.9
+    OPENAI_API_KEY: str = ""
+    ANTHROPIC_API_KEY: str = ""
+    GEMINI_API_KEY: str = ""
+
+    # --- notifications ---------------------------------------------------
+    # Every one of these is read from the environment. A provider whose settings
+    # are blank reports itself unconfigured and the product says so, rather than
+    # implying a message was delivered when nothing left the machine.
+    TELEGRAM_BOT_TOKEN: str = ""
+    TELEGRAM_CHAT_ID: str = ""
+    TELEGRAM_API_BASE: str = "https://api.telegram.org"
+    SMTP_HOST: str = ""
+    SMTP_PORT: int = 587
+    SMTP_USERNAME: str = ""
+    SMTP_PASSWORD: str = ""
+    SMTP_FROM: str = ""
+    SMTP_STARTTLS: bool = True
+    APP_BASE_URL: str = "http://localhost:3000"
+
+    @property
+    def cors_origins(self) -> list[str]:
+        return [o.strip() for o in self.CORS_ORIGINS.split(",") if o.strip()]
+
+    def validate_runtime(self) -> None:
+        """Fail loudly in production rather than running with insecure defaults."""
+        problems: list[str] = []
+        if not self.SECRET_KEY:
+            problems.append("SECRET_KEY is empty")
+        if not self.SECRET_ENCRYPTION_KEY:
+            problems.append("SECRET_ENCRYPTION_KEY is empty")
+        if self.ENV == "prod":
+            if len(self.SECRET_KEY) < 32:
+                problems.append("SECRET_KEY must be at least 32 characters in production")
+            if not self.COOKIE_SECURE:
+                problems.append("COOKIE_SECURE must be true in production")
+            if not self.ADMIN_PASSWORD:
+                problems.append("ADMIN_PASSWORD must be set in production")
+        if problems:
+            raise RuntimeError(
+                "Refusing to start with an insecure configuration: "
+                + "; ".join(problems)
+                + ". Copy environment.example to .env and fill in the values."
+            )
+
+
+@lru_cache
+def get_settings() -> Settings:
+    s = Settings()
+    # Dev/test convenience only: generate ephemeral secrets so the app can boot.
+    if not s.SECRET_KEY and s.ENV != "prod":
+        s.SECRET_KEY = secrets.token_urlsafe(48)
+    if not s.SECRET_ENCRYPTION_KEY and s.ENV != "prod":
+        from cryptography.fernet import Fernet
+
+        s.SECRET_ENCRYPTION_KEY = Fernet.generate_key().decode()
+    s.validate_runtime()
+    return s
+
+
+settings = get_settings()

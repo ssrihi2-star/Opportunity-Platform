@@ -1,0 +1,45 @@
+{
+  "https://regulator.example.gov/robots.txt": {
+    "status": 200,
+    "headers": {},
+    "body": "User-agent: *\nAllow: /\n"
+  },
+  "https://regulator.example.gov/feed.xml": {
+    "status": 200,
+    "headers": {
+      "ETag": "\"feed-etag-1\"",
+      "Content-Type": "application/rss+xml"
+    },
+    "body": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<rss version=\"2.0\"><channel>\n  <title>Regulator notices</title>\n  <link>https://regulator.example.gov/</link>\n  \n    <item>\n      <title>Heat pump rebate rule update 0</title>\n      <link>https://regulator.example.gov/notice/0</link>\n      <guid>notice-0</guid>\n      <pubDate>Tue, 01 Sep 2026 00:00:00 +0000</pubDate>\n      <description>&lt;p&gt;The agency published &lt;b&gt;notice 0&lt;/b&gt; covering heat pump water heaters.&lt;/p&gt;</description>\n    </item>\n    <item>\n      <title>Heat pump rebate rule update 1</title>\n      <link>https://regulator.example.gov/notice/1</link>\n      <guid>notice-1</guid>\n      <pubDate>Sun, 30 Aug 2026 00:00:00 +0000</pubDate>\n      <description>&lt;p&gt;The agency published &lt;b&gt;notice 1&lt;/b&gt; covering heat pump water heaters.&lt;/p&gt;</description>\n    </item>\n    <item>\n      <title>Heat pump rebate rule update 2</title>\n      <link>https://regulator.example.gov/notice/2</link>\n      <guid>notice-2</guid>\n      <pubDate>Fri, 28 Aug 2026 00:00:00 +0000</pubDate>\n      <description>&lt;p&gt;The agency published &lt;b&gt;notice 2&lt;/b&gt; covering heat pump water heaters.&lt;/p&gt;</description>\n    </item>\n    <item>\n      <title>Heat pump rebate rule update 3</title>\n      <link>https://regulator.example.gov/notice/3</link>\n      <guid>notice-3</guid>\n      <pubDate>Wed, 26 Aug 2026 00:00:00 +0000</pubDate>\n      <description>&lt;p&gt;The agency published &lt;b&gt;notice 3&lt;/b&gt; covering heat pump water heaters.&lt;/p&gt;</description>\n    </item>\n    <item>\n      <title>Heat pump rebate rule update 4</title>\n      <link>https://regulator.example.gov/notice/4</link>\n      <guid>notice-4</guid>\n      <pubDate>Mon, 24 Aug 2026 00:00:00 +0000</pubDate>\n      <description>&lt;p&gt;The agency published &lt;b&gt;notice 4&lt;/b&gt; covering heat pump water heaters.&lt;/p&gt;</description>\n    </item>\n    <item>\n      <title>Heat pump rebate rule update 5</title>\n      <link>https://regulator.example.gov/notice/5</link>\n      <guid>notice-5</guid>\n      <pubDate>Sat, 22 Aug 2026 00:00:00 +0000</pubDate>\n      <description>&lt;p&gt;The agency published &lt;b&gt;notice 5&lt;/b&gt; covering heat pump water heaters.&lt;/p&gt;</description>\n    </item>\n</channel></rss>"
+  },
+  "https://press.example.com/robots.txt": {
+    "status": 200,
+    "headers": {},
+    "body": "User-agent: *\nAllow: /\n"
+  },
+  "https://press.example.com/atom.xml": {
+    "status": 200,
+    "headers": {},
+    "body": "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<feed xmlns=\"http://www.w3.org/2005/Atom\">\n  <title>Trade press</title>\n  <entry>\n    <title>Sanitary ware imports climb</title>\n    <link href=\"https://press.example.com/a1\"/>\n    <id>tag:press,2026:a1</id>\n    <published>2026-08-30T09:00:00Z</published>\n    <summary>Ceramic sanitary ware shipments rose across North Africa.</summary>\n  </entry>\n  <entry>\n    <title>Second story</title>\n    <link href=\"https://press.example.com/a2\"/>\n    <id>tag:press,2026:a2</id>\n    <updated>2026-08-28T09:00:00Z</updated>\n    <summary>Another update.</summary>\n  </entry>\n</feed>"
+  },
+  "https://blocked.example.com/robots.txt": {
+    "status": 200,
+    "headers": {},
+    "body": "User-agent: *\nDisallow: /\n"
+  },
+  "https://blocked.example.com/feed.xml": {
+    "status": 200,
+    "headers": {},
+    "body": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<rss version=\"2.0\"><channel>\n  <title>Regulator notices</title>\n  <link>https://regulator.example.gov/</link>\n  \n    <item>\n      <title>Heat pump rebate rule update 0</title>\n      <link>https://regulator.example.gov/notice/0</link>\n      <guid>notice-0</guid>\n      <pubDate>Tue, 01 Sep 2026 00:00:00 +0000</pubDate>\n      <description>&lt;p&gt;The agency published &lt;b&gt;notice 0&lt;/b&gt; covering heat pump water heaters.&lt;/p&gt;</description>\n    </item>\n    <item>\n      <title>Heat pump rebate rule update 1</title>\n      <link>https://regulator.example.gov/notice/1</link>\n      <guid>notice-1</guid>\n      <pubDate>Sun, 30 Aug 2026 00:00:00 +0000</pubDate>\n      <description>&lt;p&gt;The agency published &lt;b&gt;notice 1&lt;/b&gt; covering heat pump water heaters.&lt;/p&gt;</description>\n    </item>\n    <item>\n      <title>Heat pump rebate rule update 2</title>\n      <link>https://regulator.example.gov/notice/2</link>\n      <guid>notice-2</guid>\n      <pubDate>Fri, 28 Aug 2026 00:00:00 +0000</pubDate>\n      <description>&lt;p&gt;The agency published &lt;b&gt;notice 2&lt;/b&gt; covering heat pump water heaters.&lt;/p&gt;</description>\n    </item>\n    <item>\n      <title>Heat pump rebate rule update 3</title>\n      <link>https://regulator.example.gov/notice/3</link>\n      <guid>notice-3</guid>\n      <pubDate>Wed, 26 Aug 2026 00:00:00 +0000</pubDate>\n      <description>&lt;p&gt;The agency published &lt;b&gt;notice 3&lt;/b&gt; covering heat pump water heaters.&lt;/p&gt;</description>\n    </item>\n    <item>\n      <title>Heat pump rebate rule update 4</title>\n      <link>https://regulator.example.gov/notice/4</link>\n      <guid>notice-4</guid>\n      <pubDate>Mon, 24 Aug 2026 00:00:00 +0000</pubDate>\n      <description>&lt;p&gt;The agency published &lt;b&gt;notice 4&lt;/b&gt; covering heat pump water heaters.&lt;/p&gt;</description>\n    </item>\n    <item>\n      <title>Heat pump rebate rule update 5</title>\n      <link>https://regulator.example.gov/notice/5</link>\n      <guid>notice-5</guid>\n      <pubDate>Sat, 22 Aug 2026 00:00:00 +0000</pubDate>\n      <description>&lt;p&gt;The agency published &lt;b&gt;notice 5&lt;/b&gt; covering heat pump water heaters.&lt;/p&gt;</description>\n    </item>\n</channel></rss>"
+  },
+  "https://broken.example.com/robots.txt": {
+    "status": 404,
+    "headers": {},
+    "body": ""
+  },
+  "https://broken.example.com/feed.xml": {
+    "status": 200,
+    "headers": {},
+    "body": "<html><body>Service unavailable</body></html>"
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "https://comtradeapi.un.org/data/v1/get/C/A/HS?*": {
+    "status": 200,
+    "headers": {},
+    "body": "{\"count\": 7, \"data\": [{\"period\": \"2019\", \"reporterCode\": 788, \"partnerCode\": 0, \"cmdCode\": \"6910\", \"flowCode\": \"M\", \"netWgt\": 1000000, \"primaryValue\": 4000000}, {\"period\": \"2020\", \"reporterCode\": 788, \"partnerCode\": 0, \"cmdCode\": \"6910\", \"flowCode\": \"M\", \"netWgt\": 1180000, \"primaryValue\": 4000000}, {\"period\": \"2021\", \"reporterCode\": 788, \"partnerCode\": 0, \"cmdCode\": \"6910\", \"flowCode\": \"M\", \"netWgt\": 1360000, \"primaryValue\": 4000000}, {\"period\": \"2022\", \"reporterCode\": 788, \"partnerCode\": 0, \"cmdCode\": \"6910\", \"flowCode\": \"M\", \"netWgt\": 1540000, \"primaryValue\": 4000000}, {\"period\": \"2023\", \"reporterCode\": 788, \"partnerCode\": 0, \"cmdCode\": \"6910\", \"flowCode\": \"M\", \"netWgt\": 1720000, \"primaryValue\": 4000000}, {\"period\": \"2024\", \"reporterCode\": 788, \"partnerCode\": 0, \"cmdCode\": \"6910\", \"flowCode\": \"M\", \"netWgt\": 1900000, \"primaryValue\": 4000000}, {\"period\": \"2025\", \"reporterCode\": 788, \"partnerCode\": 0, \"cmdCode\": \"6910\", \"flowCode\": \"M\", \"netWgt\": 2080000, \"primaryValue\": 4000000}]}"
+  }
+}

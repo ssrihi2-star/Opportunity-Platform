@@ -1,0 +1,81 @@
+# ---------------------------------------------------------------- application
+APP_NAME="Opportunity Intelligence System"
+ENV=dev                       # dev | test | prod
+DEBUG=false
+LOG_LEVEL=INFO
+
+# ------------------------------------------------------------------- security
+# Generate with:
+#   python -c "import secrets; print(secrets.token_urlsafe(48))"
+SECRET_KEY=
+#   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+SECRET_ENCRYPTION_KEY=
+ACCESS_TOKEN_MINUTES=15
+REFRESH_TOKEN_DAYS=14
+COOKIE_SECURE=false           # MUST be true in production
+CORS_ORIGINS=http://localhost:3000
+RATE_LIMIT_PER_MINUTE=240
+LOGIN_RATE_LIMIT_PER_MINUTE=10
+
+# ------------------------------------------------------------------- database
+POSTGRES_USER=ois
+POSTGRES_PASSWORD=change-me-please
+POSTGRES_DB=ois
+DATABASE_URL=postgresql+asyncpg://ois:change-me-please@postgres:5432/ois
+REDIS_URL=redis://redis:6379/0
+DB_ECHO=false
+
+# ------------------------------------------------------------ bootstrap admin
+ADMIN_EMAIL=admin@example.com
+ADMIN_PASSWORD=                # at least 10 characters
+SEED_DEMO_DATA=true
+
+# ------------------------------------------------------------------ ingestion
+SOURCE_RUN_STALE_MINUTES=60
+MAX_RECORDS_PER_RUN=5000
+HTTP_TIMEOUT_SECONDS=30
+HTTP_CACHE_TTL_SECONDS=900
+ROBOTS_CACHE_TTL_SECONDS=86400
+# Several sources (SEC EDGAR in particular) require a descriptive User-Agent and
+# a contact address. Put a real address here before enabling those sources.
+USER_AGENT="OpportunityIntelligenceSystem/0.2 (research; +https://example.invalid/ois)"
+CONTACT_EMAIL=ois-operator@example.invalid
+
+# ------------------------------------------------- opportunity gate + scoring
+MIN_SIGNAL_TYPES=3
+MIN_INDEPENDENT_SOURCES=2
+MIN_CONFIDENCE=0.50
+MAX_EVIDENCE_AGE_DAYS=30
+MIN_RAW_SCORE=30
+
+# ------------------------------------------------------------------------- AI
+AI_PROVIDER=echo               # echo | openai | anthropic | gemini | local
+AI_MODEL_SMALL=small
+AI_MODEL_LARGE=large
+AI_DAILY_BUDGET_USD=2.0
+AI_MONTHLY_BUDGET_USD=40.0
+AI_SHORTLIST_SIZE=20
+MIN_CITATION_DENSITY=0.9
+OPENAI_API_KEY=
+ANTHROPIC_API_KEY=
+GEMINI_API_KEY=
+
+# -------------------------------------------------------------- notifications
+# Notifications. Every value here is a secret read from the environment; none of
+# them is ever committed. A blank value simply means that channel is off, and the
+# product shows it as not configured instead of pretending a message was sent.
+TELEGRAM_BOT_TOKEN=
+TELEGRAM_CHAT_ID=
+TELEGRAM_API_BASE=https://api.telegram.org
+SMTP_HOST=
+SMTP_PORT=587
+SMTP_USERNAME=
+SMTP_PASSWORD=
+SMTP_FROM=
+SMTP_STARTTLS=true
+
+# Where the web app is reachable, used to build links inside notifications.
+APP_BASE_URL=http://localhost:3000
+
+# -------------------------------------------------------------------- frontend
+NEXT_PUBLIC_API_URL=http://localhost:8000/api/v1
