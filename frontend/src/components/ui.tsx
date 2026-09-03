@@ -79,6 +79,35 @@ const STATUS_STYLE: Record<string, { color: string; icon: string }> = {
 };
 
 /**
+ * Where the evidence behind a candidate came from.
+ *
+ * Shared rather than copied: this badge is how the product tells someone their
+ * data has NOT been checked against the live internet, and two copies of that
+ * rule drift apart the moment one of them is updated.
+ */
+export function ValidationBadge({ status }: { status: string }) {
+  const { t } = useApp();
+  const label =
+    status === "live_validated"
+      ? t.opportunities.liveBadge
+      : status === "unvalidated"
+        ? t.opportunities.unvalidatedBadge
+        : t.opportunities.demoBadge;
+  const critical = status !== "live_validated";
+  return (
+    <span
+      className="rounded px-1.5 py-0.5 text-[10px] font-semibold tracking-wide"
+      style={{
+        background: critical ? "var(--status-warning)" : "var(--status-good)",
+        color: "#fff",
+      }}
+    >
+      {label}
+    </span>
+  );
+}
+
+/**
  * A 0-100 bar. Reads as a proportion at a glance, with the number still shown.
  * `tone` recolours the fill so two scores can sit side by side without
  * blending into each other (e.g. the global score vs. the user relevance).

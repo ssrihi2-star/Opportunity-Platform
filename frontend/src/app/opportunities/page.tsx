@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { Guard } from "@/components/Guard";
-import { Card, ScoreBar, StatusBadge, vocab } from "@/components/ui";
+import { Card, ScoreBar, StatusBadge, ValidationBadge, vocab } from "@/components/ui";
 import { api } from "@/lib/api";
 import { useApp } from "@/lib/providers";
 import type { GenerateResult, Opportunity, Page } from "@/lib/types";
@@ -30,27 +30,6 @@ const STATES = [
 ];
 
 /** Where the evidence came from. Shown on every card, without exception. */
-function ValidationBadge({ status }: { status: string }) {
-  const { t } = useApp();
-  const label =
-    status === "live_validated"
-      ? t.opportunities.liveBadge
-      : status === "unvalidated"
-        ? t.opportunities.unvalidatedBadge
-        : t.opportunities.demoBadge;
-  const critical = status !== "live_validated";
-  return (
-    <span
-      className="rounded px-1.5 py-0.5 text-[10px] font-semibold tracking-wide"
-      style={{
-        background: critical ? "var(--status-warning)" : "var(--status-good)",
-        color: "#fff",
-      }}
-    >
-      {label}
-    </span>
-  );
-}
 
 function Body() {
   const { t, token } = useApp();
