@@ -360,6 +360,48 @@ def _capital_openness(required: float | None) -> float:
     return 0.15
 
 
+#: Capital at which money alone stops being the deciding factor and starts
+#: being a fact about the scale of the thing. Used only to REINFORCE recorded
+#: barriers, never on its own — a large number is not evidence that no route
+#: exists. A $400M factory can still be supplied to, invested in or worked for.
+PROHIBITIVE_CAPITAL_USD: float = 10_000_000.0
+
+
+def accessibility_verdict(inp: OpportunityInput) -> tuple[bool, str]:
+    """Is there any way in at all — for anyone, anywhere? Absolute, never per-user.
+
+    A real trend that nobody can act on is a fact about the world, not an
+    opportunity, and the product should say so rather than scoring it low and
+    letting the reason blur into a generic "score too low".
+
+    This only ever concludes "closed" from **recorded, evidenced barriers**.
+    Capital can reinforce that evidence but can never establish it alone: the
+    absence of a route has to be observed, not inferred from a big number.
+
+    Before Phase 5 this judgement was an accident of arithmetic — the capital
+    branch of `_accessibility` early-returned exactly 0.0 when the requirement
+    exceeded *one configured user's* ceiling, and the refusal keyed off that
+    zero. That made a supposedly global refusal depend on whose profile was
+    loaded. It is now explicit, and reads nothing about any person.
+    """
+    barriers = inp.accessibility_barriers
+    if len(barriers) >= 3:
+        return True, (f"{len(barriers)} independent barriers stand in the way: " + "; ".join(barriers[:3]))
+    if len(barriers) >= 2:
+        difficulty = (inp.technical_difficulty or "unknown").lower()
+        dear = inp.capital_required_usd is not None and inp.capital_required_usd >= PROHIBITIVE_CAPITAL_USD
+        if dear or difficulty == "high":
+            because = (
+                f"about {inp.capital_required_usd:,.0f} USD is required"
+                if dear
+                else "the technical difficulty is high"
+            )
+            return True, (
+                f"{len(barriers)} barriers stand in the way and {because}: " + "; ".join(barriers[:2])
+            )
+    return False, ""
+
+
 def _accessibility(inp: OpportunityInput) -> tuple[float, str]:
     """How reachable is this, for anyone at all?
 
@@ -368,8 +410,15 @@ def _accessibility(inp: OpportunityInput) -> tuple[float, str]:
     person. It now reads only the opportunity's own absolute requirement.
     """
     maximum = COMPONENT_MAX["accessibility"]
-    headroom = _capital_openness(inp.capital_required_usd)
 
+    # The component and the refusal must agree by construction. Deriving one
+    # from the other is what stops them drifting apart the way they did when the
+    # refusal depended on an incidental early return.
+    closed, _ = accessibility_verdict(inp)
+    if closed:
+        return 0.0, ("No accessible way in: " + "; ".join(inp.accessibility_barriers[:3]) + ".")
+
+    headroom = _capital_openness(inp.capital_required_usd)
     barrier_penalty = min(1.0, len(inp.accessibility_barriers) * 0.25)
     difficulty = (inp.technical_difficulty or "unknown").lower()
     diff_fraction = {"low": 1.0, "medium": 0.6, "high": 0.25}.get(difficulty, 0.5)

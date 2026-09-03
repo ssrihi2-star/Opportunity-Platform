@@ -12,6 +12,7 @@ from app.analytics.opportunity_config import COMPONENT_MAX, MAX_TOTAL_PENALTY
 from app.analytics.opportunity_scoring import (
     EvidenceFact,
     OpportunityInput,
+    accessibility_verdict,
     next_state,
     score_confidence,
     score_opportunity,
@@ -366,3 +367,84 @@ def test_accessibility_reads_absolute_capital_not_a_personal_ceiling():
 def test_the_same_input_always_produces_the_same_global_score():
     inp = good_input()
     assert score_opportunity(inp).opportunity_score == score_opportunity(inp).opportunity_score
+
+
+# ------------------------------------------------- no accessible way to take part
+# A real trend nobody can act on is a fact about the world, not an opportunity.
+# This refusal used to be an accident of arithmetic: `_accessibility` early
+# returned exactly 0.0 when capital exceeded ONE CONFIGURED USER'S ceiling, and
+# the refusal keyed off that zero. Phase 5 removed the personal ceiling from the
+# global score — correctly — and the refusal silently stopped firing. These tests
+# pin the behaviour to evidence rather than to a number that happened to be zero.
+def euv_like(**over):
+    """The shape of a genuinely closed route: recorded barriers, huge capital."""
+    return good_input(
+        capital_required_usd=over.pop("capital_required_usd", 400_000_000),
+        technical_difficulty=over.pop("technical_difficulty", "high"),
+        accessibility_barriers=over.pop(
+            "accessibility_barriers",
+            [
+                "One manufacturer worldwide, with a multi-year order book",
+                "Export controls restrict who may buy",
+                "Capital requirement is orders of magnitude beyond individual reach",
+            ],
+        ),
+        **over,
+    )
+
+
+def test_three_recorded_barriers_close_the_route():
+    closed, why = accessibility_verdict(euv_like())
+    assert closed is True
+    assert "One manufacturer worldwide" in why
+
+
+def test_a_closed_route_scores_zero_accessibility():
+    """The component and the refusal must agree by construction, not by luck."""
+    score = score_opportunity(euv_like())
+    assert score.components["accessibility"]["points"] == 0.0
+    assert "No accessible way in" in score.components["accessibility"]["why"]
+
+
+def test_capital_alone_never_closes_a_route():
+    """A large number is not evidence that no way in exists.
+
+    A $400m factory can still be supplied to, invested in, or worked for. Only
+    recorded barriers may establish that the route is shut.
+    """
+    closed, _ = accessibility_verdict(euv_like(accessibility_barriers=[]))
+    assert closed is False
+    closed_one, _ = accessibility_verdict(
+        euv_like(accessibility_barriers=["Export controls restrict who may buy"])
+    )
+    assert closed_one is False
+
+
+def test_two_barriers_close_the_route_only_when_reinforced():
+    two = ["Export controls restrict who may buy", "One manufacturer worldwide"]
+    hard = accessibility_verdict(
+        euv_like(accessibility_barriers=two, technical_difficulty="high", capital_required_usd=5_000)
+    )
+    easy = accessibility_verdict(
+        euv_like(accessibility_barriers=two, technical_difficulty="low", capital_required_usd=5_000)
+    )
+    dear = accessibility_verdict(
+        euv_like(accessibility_barriers=two, technical_difficulty="low", capital_required_usd=50_000_000)
+    )
+    assert hard[0] is True, "two barriers plus high difficulty is a closed route"
+    assert dear[0] is True, "two barriers plus prohibitive capital is a closed route"
+    assert easy[0] is False, "two barriers alone are not enough to refuse"
+
+
+def test_an_ordinary_candidate_is_never_called_inaccessible():
+    """The five scenarios with no recorded barriers must be untouched by this."""
+    closed, why = accessibility_verdict(good_input())
+    assert closed is False
+    assert why == ""
+
+
+def test_the_verdict_reads_nothing_about_any_person():
+    """Absolute by construction: the signature admits no user, profile or ceiling."""
+    import inspect
+
+    assert list(inspect.signature(accessibility_verdict).parameters) == ["inp"]

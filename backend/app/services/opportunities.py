@@ -36,6 +36,7 @@ from app.analytics.opportunity_config import OPPORTUNITY_VERSION
 from app.analytics.opportunity_scoring import (
     EvidenceFact,
     OpportunityInput,
+    accessibility_verdict,
     check_gate,
     next_state,
     score_confidence,
@@ -324,16 +325,23 @@ async def evaluate_one(
         else None
     )
 
-    # 7a. No accessible way to take part. A real trend that nobody in this
-    # position can act on is not an opportunity — it is a fact about the world.
-    if score.components["accessibility"]["points"] <= 0 and inp.accessibility_barriers:
+    # 7a. No accessible way to take part. A real trend that nobody can act on is
+    # not an opportunity — it is a fact about the world, and saying so plainly
+    # is more useful than a low score whose reason reads as "not much here".
+    #
+    # This asks the scoring module for an explicit verdict rather than inferring
+    # one from `points == 0`. Keying off the zero coupled this refusal to an
+    # incidental early return, and when that return was removed in Phase 5 the
+    # refusal silently stopped firing while every test but one still passed.
+    inaccessible, why_closed = accessibility_verdict(inp)
+    if inaccessible:
         return None, Rejection(
             trend_id=str(trend.id),
             trend_name=trend.name,
             opportunity_type=opportunity_type,
             reasons=[
                 "The trend is real, but there is no accessible way to take part: "
-                + "; ".join(inp.accessibility_barriers[:3])
+                + why_closed
                 + ". Recorded as a trend to watch rather than as an opportunity."
             ],
         )
