@@ -627,7 +627,20 @@ def _outside_profile(user: UserContext, opp: OpportunityContext) -> tuple[bool, 
         )
     if opp.confidence < user.min_confidence:
         reasons.append(f"confidence {opp.confidence:.0f} is below your minimum of {user.min_confidence:.0f}")
-    if RISK_RANK.get(opp.risk_level, 2) > RISK_RANK.get(user.max_risk_level, 3):
+    # A risk ceiling we cannot interpret must fail CLOSED. This previously read
+    # `RISK_RANK.get(user.max_risk_level, 3)`, so any unrecognised value — such
+    # as the "medium" that the preferences API used to accept — silently became
+    # the most permissive setting available, and a very-high-risk candidate was
+    # presented as fitting the profile of someone who had asked for the
+    # opposite. Flagging on an unknown ceiling is safe; the flag never hides
+    # anything, it only tells the reader this sits outside what they asked for.
+    ceiling = RISK_RANK.get(user.max_risk_level)
+    if ceiling is None:
+        reasons.append(
+            f"your maximum risk level is recorded as {user.max_risk_level!r}, which "
+            "this system does not recognise, so nothing is assumed about it"
+        )
+    elif RISK_RANK.get(opp.risk_level, 2) > ceiling:
         reasons.append(f"{opp.risk_level.replace('_', ' ')} risk exceeds your maximum")
     if (
         user.max_capital_required is not None

@@ -15,14 +15,27 @@ async def test_preferences_partial_update(client: AsyncClient, viewer_headers):
     resp = await client.patch(
         "/api/v1/preferences",
         headers=viewer_headers,
-        json={"countries": ["TN", "LY"], "max_risk_level": "medium", "capital_max_usd": 5000},
+        json={"countries": ["TN", "LY"], "max_risk_level": "moderate", "capital_max_usd": 5000},
     )
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["countries"] == ["TN", "LY"]
-    assert body["max_risk_level"] == "medium"
+    assert body["max_risk_level"] == "moderate"
     assert body["capital_max_usd"] == 5000
     assert body["min_confidence"] == 0.65  # untouched field keeps its value
+
+
+async def test_the_risk_level_the_engine_never_emits_is_rejected(client: AsyncClient, viewer_headers):
+    """ "medium" used to be the only value this field accepted.
+
+    The risk engine has always emitted "moderate", so a ceiling of "medium"
+    matched nothing and, worse, the relevance engine read the unrecognised value
+    as the most permissive setting available. Storing it must now be impossible.
+    """
+    resp = await client.patch(
+        "/api/v1/preferences", headers=viewer_headers, json={"max_risk_level": "medium"}
+    )
+    assert resp.status_code == 422
 
 
 async def test_invalid_risk_level_rejected(client: AsyncClient, viewer_headers):

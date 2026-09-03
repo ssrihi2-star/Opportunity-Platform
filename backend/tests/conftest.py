@@ -12,6 +12,7 @@ import json
 import os
 import pathlib
 import socket
+import urllib.parse
 import uuid
 from collections.abc import AsyncGenerator
 
@@ -41,8 +42,31 @@ FIXTURES = pathlib.Path(__file__).parent / "fixtures"
 _real_socket = socket.socket
 
 
+def _allowed_database_endpoint() -> tuple[str, int] | None:
+    """The one address tests may dial, and only when explicitly asked to.
+
+    `TEST_POSTGRES_URL` opts a run into the PostgreSQL integrity checks, which
+    need a real database to mean anything — SQLite cannot exhibit the savepoint
+    and transaction-abort behaviour they exist to test. This is a narrow
+    exemption for that one host and port, not a hole in the rule: every other
+    address still raises, so nothing can quietly reach the internet.
+    """
+    url = os.environ.get("TEST_POSTGRES_URL")
+    if not url:
+        return None
+    parsed = urllib.parse.urlparse(url)
+    if not parsed.hostname:
+        return None
+    return parsed.hostname, parsed.port or 5432
+
+
 class _BlockedSocket(socket.socket):
-    def connect(self, *args, **kwargs):  # noqa: ANN002, ANN003
+    def connect(self, address, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+        allowed = _allowed_database_endpoint()
+        if allowed and isinstance(address, tuple) and len(address) >= 2:
+            host, port = address[0], address[1]
+            if (host, port) == allowed or (host in {"127.0.0.1", "::1"} and port == allowed[1]):
+                return super().connect(address, *args, **kwargs)
         raise RuntimeError(
             "A test tried to open a network connection. Tests must use recorded "
             "fixtures; see docs/testing.md."

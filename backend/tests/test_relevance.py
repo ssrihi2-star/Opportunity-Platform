@@ -15,6 +15,7 @@ from app.analytics.relevance import (
     FACTOR_MAX,
     PATH_REQUIREMENTS,
     RELEVANCE_VERSION,
+    RISK_RANK,
     OpportunityContext,
     UserContext,
     score_relevance,
@@ -316,3 +317,38 @@ def test_thin_country_coverage_is_reported_as_our_gap() -> None:
     """Section 30 again, this time in the per-user explanation."""
     result = score_relevance(NG_ENTREPRENEUR, opportunity(country="NG", country_data_coverage=12.0))
     assert any("gap in our data" in note for note in result.notes)
+
+
+# ------------------------------------------------- the risk-ceiling fail-open
+# These exist because the bug they describe was real, silent, and pointed the
+# wrong way: an unrecognised risk ceiling resolved to the most permissive
+# setting, so a user who asked for less risk was shown more of it, unflagged.
+def test_an_unrecognised_risk_ceiling_fails_closed() -> None:
+    opp = opportunity(risk_level="very_high", participation_paths=["build"])
+    user = UserContext(operating_countries=["US"], max_risk_level="medium")
+    result = score_relevance(user, opp)
+    assert result.outside_profile is True, "an uninterpretable ceiling must flag, never wave things through"
+    assert any("does not recognise" in note for note in result.notes)
+
+
+def test_an_unrecognised_ceiling_is_not_treated_as_the_most_permissive() -> None:
+    opp = opportunity(risk_level="very_high", participation_paths=["build"])
+    unknown = score_relevance(UserContext(operating_countries=["US"], max_risk_level="medium"), opp)
+    permissive = score_relevance(UserContext(operating_countries=["US"], max_risk_level="very_high"), opp)
+    assert unknown.outside_profile != permissive.outside_profile
+
+
+@pytest.mark.parametrize("ceiling", ["low", "moderate", "high"])
+def test_a_ceiling_below_the_risk_always_flags(ceiling: str) -> None:
+    opp = opportunity(risk_level="very_high", participation_paths=["build"])
+    result = score_relevance(UserContext(operating_countries=["US"], max_risk_level=ceiling), opp)
+    assert result.outside_profile is True
+
+
+def test_every_risk_level_the_engine_emits_is_understood_here() -> None:
+    """The enum, the risk engine and this table must not drift apart again."""
+    from app.analytics.risk_engine import LEVELS
+    from app.models.enums import RiskLevel
+
+    assert set(LEVELS) == set(RISK_RANK)
+    assert {level.value for level in RiskLevel} == set(RISK_RANK)
