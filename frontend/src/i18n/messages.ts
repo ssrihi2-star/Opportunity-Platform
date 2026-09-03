@@ -12,6 +12,7 @@ export const messages = {
       trends: "Trends",
       review: "Entity review",
       opportunities: "Opportunities",
+      forYou: "For you",
       reports: "Reports",
       backtesting: "Backtesting",
     },
@@ -316,6 +317,24 @@ export const messages = {
         watching: "Watching",
       },
     },
+    forYou: {
+      title: "For you",
+      subtitle:
+        "The same global opportunities, ordered by how well they fit you. Every card carries two separate numbers: the Global Opportunity Score, which is identical for everyone, and your Relevance Score, which is yours alone.",
+      howTitle: "How to read this",
+      how: [
+        "Global Opportunity Score (blue) is the same for every user. It measures the evidence — not you.",
+        "Relevance to you (orange) comes from your profile: country, industries, capital, skills, risk tolerance.",
+        "The two never merge. An opportunity can be strong globally yet a poor fit for you — or modest globally yet a great fit.",
+      ],
+      minRelevance: "Minimum relevance",
+      includeOutside: "Include what sits outside my profile",
+      includeOutsideHint:
+        "Turning this off hides items outside your filters. They are flagged, never silently dropped.",
+      empty:
+        "No opportunities to rank for you yet. Once candidates exist, they are ordered by how well they fit your profile.",
+      noProfileHint: "Relevance comes from your profile. Fill it in to make this ordering meaningful.",
+    },
     review: {
       title: "Entity review",
       subtitle:
@@ -348,6 +367,7 @@ export const messages = {
       trends: "الاتجاهات",
       review: "مراجعة الكيانات",
       opportunities: "الفرص",
+      forYou: "من أجلك",
       reports: "التقارير",
       backtesting: "الاختبار الرجعي",
     },
@@ -642,6 +662,22 @@ export const messages = {
         acted_on: "تم التنفيذ",
         watching: "أتابع",
       },
+    },
+    forYou: {
+      title: "من أجلك",
+      subtitle:
+        "نفس الفرص العالمية، مرتبة حسب مدى ملاءمتها لك. تحمل كل بطاقة رقمين منفصلين: درجة الفرصة العالمية، وهي واحدة للجميع، ودرجة الملاءمة، وهي خاصة بك وحدك.",
+      howTitle: "كيف تقرأ هذا",
+      how: [
+        "درجة الفرصة العالمية (أزرق) واحدة لكل مستخدم. تقيس الأدلة — لا تقيسك أنت.",
+        "درجة الملاءمة لك (برتقالي) تأتي من ملفك: الدولة، القطاعات، رأس المال، المهارات، تحمّل المخاطر.",
+        "الرقمان لا يندمجان أبداً. قد تكون الفرصة قوية عالمياً وغير مناسبة لك — أو متواضعة عالمياً ومناسبة تماماً لك.",
+      ],
+      minRelevance: "حد أدنى للملاءمة",
+      includeOutside: "أظهر ما يقع خارج ملفي",
+      includeOutsideHint: "إيقافه يخفي العناصر خارج تفضيلاتك. تظهر مُعلَّمة ولا تُحذف بصمت أبداً.",
+      empty: "لا توجد فرص لترتيبها لك بعد. عند وجود مرشحات، ستُرتَّب حسب مدى ملاءمتها لملفك.",
+      noProfileHint: "الملاءمة تأتي من ملفك. أكمل ملفك ليصبح هذا الترتيب أكثر معنى.",
     },
     review: {
       title: "مراجعة الكيانات",

@@ -78,8 +78,12 @@ const STATUS_STYLE: Record<string, { color: string; icon: string }> = {
   declining: { color: "var(--status-critical)", icon: "▼" },
 };
 
-/** A 0-100 bar. Reads as a proportion at a glance, with the number still shown. */
-export function ScoreBar({ value, max = 100 }: { value: number; max?: number }) {
+/**
+ * A 0-100 bar. Reads as a proportion at a glance, with the number still shown.
+ * `tone` recolours the fill so two scores can sit side by side without
+ * blending into each other (e.g. the global score vs. the user relevance).
+ */
+export function ScoreBar({ value, max = 100, tone = "var(--series-1)" }: { value: number; max?: number; tone?: string }) {
   const pct = Math.max(0, Math.min(100, (value / max) * 100));
   return (
     <span className="inline-flex items-center gap-2">
@@ -90,7 +94,7 @@ export function ScoreBar({ value, max = 100 }: { value: number; max?: number }) 
       >
         <span
           className="block h-1.5 rounded"
-          style={{ width: `${pct}%`, background: "var(--series-1)" }}
+          style={{ width: `${pct}%`, background: tone }}
         />
       </span>
       <span className="tabular text-sm" dir="ltr">
@@ -144,6 +148,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
     { href: "/", label: t.nav.overview },
     { href: "/trends", label: t.nav.trends },
     { href: "/opportunities", label: t.nav.opportunities },
+    { href: "/for-you", label: t.nav.forYou },
     { href: "/signals", label: t.nav.signals },
     { href: "/sources", label: t.nav.sources },
     { href: "/review", label: t.nav.review },
