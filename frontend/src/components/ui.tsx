@@ -178,6 +178,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
     { href: "/trends", label: t.nav.trends },
     { href: "/opportunities", label: t.nav.opportunities },
     { href: "/for-you", label: t.nav.forYou },
+    { href: "/watchlists", label: t.nav.watchlists },
     { href: "/signals", label: t.nav.signals },
     { href: "/sources", label: t.nav.sources },
     { href: "/review", label: t.nav.review },
