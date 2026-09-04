@@ -450,3 +450,62 @@ export type GenerateResult = {
   validation_status: string;
   rejections: { trend_id: string; trend_name: string; opportunity_type: string; reasons: string[] }[];
 };
+
+// ------------------------------------------------------------------ watchlists
+/** What a watchlist item follows. Only the matching field is ever sent. */
+export type WatchTargetKind =
+  | "opportunity"
+  | "trend"
+  | "company"
+  | "technology"
+  | "product"
+  | "country"
+  | "industry"
+  | "keyword";
+
+/**
+ * A watchlist item carries NO score of its own. When `item_type` is
+ * "opportunity" the caller joins `opportunity_id` against the hydrated feed to
+ * show the opportunity's real scores; every other type has none by definition.
+ */
+export type WatchlistItem = {
+  id: string;
+  created_at: string;
+  item_type: WatchTargetKind;
+  opportunity_id: string | null;
+  trend_id: string | null;
+  entity_id: string | null;
+  country_code: string | null;
+  industry: string | null;
+  keyword: string | null;
+  label: string | null;
+};
+
+export type Watchlist = {
+  id: string;
+  name: string;
+  description: string | null;
+  /** The user's filter threshold (0..100), NOT a score. */
+  min_score: number | null;
+  max_risk_level: string | null;
+  created_at: string;
+  items: WatchlistItem[];
+};
+
+export type WatchlistIn = {
+  name: string;
+  description: string | null;
+  min_score: number | null;
+  max_risk_level: string | null;
+};
+
+export type WatchlistItemIn = {
+  item_type: WatchTargetKind;
+  opportunity_id: string | null;
+  trend_id: string | null;
+  entity_id: string | null;
+  country_code: string | null;
+  industry: string | null;
+  keyword: string | null;
+  label: string | null;
+};
