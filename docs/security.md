@@ -36,6 +36,13 @@
   50,000-row limit.
 * The access token is held in browser memory only — never `localStorage` — and
   re-obtained from the refresh cookie on reload.
+* Telegram chat binding proves control of the chat: the chat id is taken only
+  from an update Telegram delivers to a webhook authenticated by a shared secret
+  header compared in constant time, which fails closed when unconfigured. Link
+  codes expire, are single-use and are claimed atomically; `(channel,
+  external_id)` is unique, so one chat belongs to one account. Full detail, and
+  the migration that revokes bindings made under the previous flow, in
+  `telegram-linking.md`.
 
 ## 3. Not implemented yet (honest list)
 

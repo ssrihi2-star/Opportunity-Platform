@@ -1253,9 +1253,18 @@ class NotificationChannelLink(UUIDMixin, TimestampMixin, Base):
     #: users can never claim the same chat.
     external_id: Mapped[str] = mapped_column(sa.String(200), index=True)
     link_code: Mapped[str | None] = mapped_column(sa.String(64), index=True)
+    #: When the pending code stops being accepted. NULL on rows with no code.
+    #: A code with no expiry is a password with no expiry, and this one is
+    #: pasted into a chat window where it tends to stay visible.
+    link_code_expires_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True))
     verified: Mapped[bool] = mapped_column(sa.Boolean, default=False)
     verified_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True))
 
+    #: One chat, one account, enforced by the database rather than by a check
+    #: the application might forget to run. Two concurrent /link attempts for the
+    #: same chat therefore cannot both succeed: the second hits this constraint
+    #: and is rolled back. Pending rows hold a unique "pending:<code>" placeholder
+    #: so they never collide with each other or with a real chat id.
     __table_args__ = (sa.UniqueConstraint("channel", "external_id", name="ux_channel_external"),)
 
 

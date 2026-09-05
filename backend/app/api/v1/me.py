@@ -14,7 +14,6 @@ or a rule by id refuse to return one that belongs to somebody else, answering
 
 from __future__ import annotations
 
-import secrets
 import uuid
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
@@ -24,11 +23,13 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import current_user, db_session
+from app.api.v1 import telegram
 from app.models.enums import DigestFrequency
 from app.models.models import (
     AlertDelivery,
     AlertRule,
     Digest,
+    Entity,
     NotificationChannelLink,
     Opportunity,
     Trend,
@@ -367,6 +368,37 @@ async def delete_watchlist(
     await session.commit()
 
 
+async def _reject_dangling_references(session: AsyncSession, data: dict[str, object]) -> None:
+    """Refuse ids that point at nothing. Only the ids actually supplied are checked.
+
+    The three id columns are real foreign keys, but nothing above this point has
+    ever looked at what they point to, and the two engines disagree about what
+    that means: PostgreSQL raises a violation the app does not handle and answers
+    500, while SQLite does not enforce foreign keys at all under the test suite
+    and quietly stores a row that references a nonexistent thing. A dangling row
+    is the worse outcome of the two, because it survives to be read back later.
+
+    Validating here fixes both at once and gives the same answer on either engine.
+    Catching IntegrityError instead would only address the PostgreSQL half, and
+    could not be tested by a suite that never raises it.
+    """
+    for field, model, message in (
+        ("opportunity_id", Opportunity, "No such opportunity."),
+        ("trend_id", Trend, "No such trend."),
+        ("entity_id", Entity, "No such entity."),
+    ):
+        value = data.get(field)
+        if value is None:
+            continue
+        # One `select 1 ... limit 1` per supplied id, and none at all when the
+        # item is a country, an industry or a keyword: those reference no row.
+        exists = (
+            await session.execute(sa.select(sa.literal(1)).where(model.id == value).limit(1))
+        ).scalar_one_or_none()
+        if exists is None:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, message)
+
+
 @router.post(
     "/me/watchlists/{watchlist_id}/items",
     response_model=WatchlistItemOut,
@@ -383,8 +415,13 @@ async def add_watchlist_item(
     A country or an industry is as followable as a company, because "tell me when
     something starts happening in Kenya" is a real question.
     """
+    # Ownership first, and deliberately so: someone probing another user's list
+    # must get the same 404 whatever they put in the body. Validating the ids
+    # first would answer 422 for a well-formed id and 404 otherwise, and that
+    # difference tells an outsider the watchlist exists.
     watchlist = await _own_watchlist(session, user, watchlist_id)
     data = body.model_dump()
+    await _reject_dangling_references(session, data)
     if data.get("country_code"):
         data["country_code"] = data["country_code"].upper()
     item = WatchlistItem(watchlist_id=watchlist.id, **data)
@@ -508,7 +545,9 @@ async def generate_digest(
 LINK_INSTRUCTIONS = {
     "telegram": (
         "Open the bot in Telegram and send: /link {code}. Until you do, nothing is "
-        "sent to that chat, and the chat cannot read anything about your account."
+        "sent to that chat, and the chat cannot read anything about your account. "
+        "The code expires shortly and works once. Send it in a direct message with "
+        "the bot, not in a group."
     ),
 }
 
@@ -546,13 +585,18 @@ async def start_channel_link(
     The code — not the chat id — is what proves the chat belongs to this account.
     Without it, anyone who knew or guessed a chat id could attach it to their own
     account and start receiving another person's alerts.
+
+    Issuing the code is only half the exchange. It is redeemed by sending it
+    *into the chat*, where Telegram observes which chat it came from and tells
+    the webhook. Nothing this endpoint returns can complete a link on its own.
     """
-    code = secrets.token_urlsafe(12)
+    code = telegram.new_link_code()
     link = NotificationChannelLink(
         user_id=user.id,
         channel=body.channel,
-        external_id=f"pending:{code}",
+        external_id=telegram.pending_placeholder(code),
         link_code=code,
+        link_code_expires_at=telegram.code_expiry(),
         verified=False,
     )
     session.add(link)
@@ -574,7 +618,43 @@ async def verify_channel_link(
     session: AsyncSession = Depends(db_session),
     user: User = Depends(current_user),
 ) -> ChannelLinkOut:
-    """Complete the link by presenting the code together with the external id."""
+    """Legacy endpoint. Reports on a *pending* link; it can no longer grant one.
+
+    This endpoint used to take a `link_code` the caller had just been issued
+    together with an `external_id` the caller simply asserted, and set
+    ``verified = True`` from the pair. Both halves came from the same
+    authenticated request, so the exchange proved only that the user could type:
+    anyone could bind any chat id, including someone else's, and start receiving
+    that chat's alerts.
+
+    Verification now happens in the only place that can actually witness the
+    chat — the webhook, from an update Telegram itself delivered. The route is
+    kept so existing clients still parse a response, but the `external_id` they
+    send is ignored on purpose: nothing a caller asserts about which chat they
+    own may influence the binding.
+
+    **Use `GET /me/channels` to poll for verification.** That is the supported
+    way to watch `verified` flip, and the only one that keeps working after the
+    link succeeds.
+
+    Behaviour of *this* route, stated exactly, because it is easy to misread:
+
+    * While the code is outstanding, it returns ``200`` with
+      ``verified: false`` and the linking instructions.
+    * Once the webhook redeems the code, the code is consumed and cleared — it
+      is deliberately not retained, since a code that survives its use is a
+      credential that never expires. Nothing then matches the lookup, so this
+      route returns ``404``.
+
+    That ``404`` therefore means "no link is pending under this code", which
+    covers *both* a code that never existed and one that has already been
+    redeemed successfully. It is not an error signal and must not be read as
+    failure: a client that treats it as one will report a successful link as
+    broken. Check `GET /me/channels` to find out which happened.
+
+    Because a row only carries a `link_code` while it is unredeemed, the
+    `verified` field in this response is always ``false``.
+    """
     link = (
         await session.execute(
             sa.select(NotificationChannelLink).where(
@@ -585,34 +665,25 @@ async def verify_channel_link(
         )
     ).scalar_one_or_none()
     if link is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "No pending link with that code.")
-
-    taken = (
-        await session.execute(
-            sa.select(NotificationChannelLink).where(
-                NotificationChannelLink.channel == body.channel,
-                NotificationChannelLink.external_id == body.external_id,
-                NotificationChannelLink.id != link.id,
-            )
-        )
-    ).scalar_one_or_none()
-    if taken is not None:
+        # Either never issued, or already redeemed through the webhook. The two
+        # are indistinguishable here by design, and `GET /me/channels` is where
+        # a client learns which.
         raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            "That chat is already linked to an account. One chat, one account.",
+            status.HTTP_404_NOT_FOUND,
+            "No pending link with that code. If you have already sent /link to the bot, "
+            "check GET /me/channels — the link may have completed successfully.",
         )
 
-    link.external_id = body.external_id
-    link.verified = True
-    link.verified_at = datetime.now(UTC)
-    link.link_code = None
-    await session.commit()
+    # Reached only while the code is still outstanding, so `verified` is false
+    # and the instructions are still what the user needs. Both are read from the
+    # row rather than hardcoded, so this stays truthful if that ever changes.
     return ChannelLinkOut(
         id=link.id,
         channel=link.channel,
-        verified=True,
+        verified=link.verified,
         verified_at=link.verified_at,
         link_code=None,
+        instructions=LINK_INSTRUCTIONS.get(link.channel, "").format(code=body.link_code) or None,
     )
 
 

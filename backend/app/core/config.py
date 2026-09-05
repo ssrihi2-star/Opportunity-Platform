@@ -77,6 +77,17 @@ class Settings(BaseSettings):
     TELEGRAM_BOT_TOKEN: str = ""
     TELEGRAM_CHAT_ID: str = ""
     TELEGRAM_API_BASE: str = "https://api.telegram.org"
+    #: Shared secret echoed by Telegram in X-Telegram-Bot-Api-Secret-Token on
+    #: every webhook call, set when the webhook is registered. It is the only
+    #: thing that distinguishes a real update from anyone who can POST to the
+    #: URL, so the endpoint refuses to run at all while this is blank: an open
+    #: webhook would let a stranger bind their own chat to another account.
+    #: This is a shared secret, not a signature — it proves the caller knows the
+    #: secret, and nothing about the body.
+    TELEGRAM_WEBHOOK_SECRET: str = ""
+    #: How long a /link code stays usable. Short on purpose: the code is pasted
+    #: into a chat, and a code that never expires is a password that never does.
+    TELEGRAM_LINK_CODE_TTL_MINUTES: int = 15
     SMTP_HOST: str = ""
     SMTP_PORT: int = 587
     SMTP_USERNAME: str = ""

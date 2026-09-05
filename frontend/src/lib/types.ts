@@ -450,3 +450,76 @@ export type GenerateResult = {
   validation_status: string;
   rejections: { trend_id: string; trend_name: string; opportunity_type: string; reasons: string[] }[];
 };
+
+// ------------------------------------------------------------------ phase 5
+// Watchlists. NOTE WHAT IS ABSENT: a watchlist and its items carry NO
+// opportunity_score, NO user_relevance, NO validation_status and NO state.
+// `min_score` below is the user's own filter threshold, not a score, and must
+// never be rendered through a score-shaped element. Real scores only ever come
+// from hydrating against Opportunity objects fetched from /for-you.
+
+/** The four risk levels exactly as the backend enum spells them.
+ *  "moderate", never "medium" — the backend rejects "medium". */
+export const RISK_LEVELS = ["low", "moderate", "high", "very_high"] as const;
+export type RiskLevel = (typeof RISK_LEVELS)[number];
+
+/** Every kind of thing a watchlist can follow. */
+export const WATCH_ITEM_TYPES = [
+  "opportunity",
+  "trend",
+  "company",
+  "technology",
+  "product",
+  "country",
+  "industry",
+  "keyword",
+] as const;
+export type WatchItemType = (typeof WATCH_ITEM_TYPES)[number];
+
+export type WatchlistItem = {
+  id: string;
+  created_at: string;
+  item_type: string;
+  opportunity_id: string | null;
+  trend_id: string | null;
+  entity_id: string | null;
+  country_code: string | null;
+  industry: string | null;
+  keyword: string | null;
+  label: string | null;
+};
+
+export type Watchlist = {
+  id: string;
+  name: string;
+  description: string | null;
+  /** THE USER'S FILTER THRESHOLD, 0-100. NOT a score. Never render as one. */
+  min_score: number | null;
+  max_risk_level: string | null;
+  created_at: string;
+  items: WatchlistItem[];
+};
+
+/** Request body for POST / PUT /me/watchlists.
+ *  PUT applies exclude_unset server-side, so it behaves as PATCH: a key must be
+ *  present with an explicit null to clear it, and `name` is always required. */
+export type WatchlistIn = {
+  name: string;
+  description: string | null;
+  min_score: number | null;
+  max_risk_level: RiskLevel | null;
+};
+
+/** Request body for POST /me/watchlists/{id}/items.
+ *  The backend does NO cross-field validation, so the form is what guarantees
+ *  that item_type and its identifying field agree. */
+export type WatchlistItemIn = {
+  item_type: WatchItemType;
+  opportunity_id?: string | null;
+  trend_id?: string | null;
+  entity_id?: string | null;
+  country_code?: string | null;
+  industry?: string | null;
+  keyword?: string | null;
+  label?: string | null;
+};

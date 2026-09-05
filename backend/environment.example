@@ -67,6 +67,16 @@ GEMINI_API_KEY=
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_CHAT_ID=
 TELEGRAM_API_BASE=https://api.telegram.org
+# Shared secret you choose and hand to Telegram as `secret_token` when calling
+# setWebhook. Telegram echoes it back in the X-Telegram-Bot-Api-Secret-Token
+# header on every update, and the webhook refuses to process anything while this
+# is blank — an unauthenticated webhook would let a stranger bind their own chat
+# to somebody else's account. Use something long and random, e.g.
+# `python -c "import secrets; print(secrets.token_urlsafe(32))"`.
+# See docs/telegram-linking.md.
+TELEGRAM_WEBHOOK_SECRET=
+# Minutes a /link code stays usable before it expires. Codes are single-use.
+TELEGRAM_LINK_CODE_TTL_MINUTES=15
 SMTP_HOST=
 SMTP_PORT=587
 SMTP_USERNAME=
