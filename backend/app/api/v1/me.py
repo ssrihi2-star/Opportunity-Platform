@@ -29,6 +29,7 @@ from app.models.models import (
     AlertDelivery,
     AlertRule,
     Digest,
+    Entity,
     NotificationChannelLink,
     Opportunity,
     Trend,
@@ -367,6 +368,37 @@ async def delete_watchlist(
     await session.commit()
 
 
+async def _reject_dangling_references(session: AsyncSession, data: dict[str, object]) -> None:
+    """Refuse ids that point at nothing. Only the ids actually supplied are checked.
+
+    The three id columns are real foreign keys, but nothing above this point has
+    ever looked at what they point to, and the two engines disagree about what
+    that means: PostgreSQL raises a violation the app does not handle and answers
+    500, while SQLite does not enforce foreign keys at all under the test suite
+    and quietly stores a row that references a nonexistent thing. A dangling row
+    is the worse outcome of the two, because it survives to be read back later.
+
+    Validating here fixes both at once and gives the same answer on either engine.
+    Catching IntegrityError instead would only address the PostgreSQL half, and
+    could not be tested by a suite that never raises it.
+    """
+    for field, model, message in (
+        ("opportunity_id", Opportunity, "No such opportunity."),
+        ("trend_id", Trend, "No such trend."),
+        ("entity_id", Entity, "No such entity."),
+    ):
+        value = data.get(field)
+        if value is None:
+            continue
+        # One `select 1 ... limit 1` per supplied id, and none at all when the
+        # item is a country, an industry or a keyword: those reference no row.
+        exists = (
+            await session.execute(sa.select(sa.literal(1)).where(model.id == value).limit(1))
+        ).scalar_one_or_none()
+        if exists is None:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, message)
+
+
 @router.post(
     "/me/watchlists/{watchlist_id}/items",
     response_model=WatchlistItemOut,
@@ -383,8 +415,13 @@ async def add_watchlist_item(
     A country or an industry is as followable as a company, because "tell me when
     something starts happening in Kenya" is a real question.
     """
+    # Ownership first, and deliberately so: someone probing another user's list
+    # must get the same 404 whatever they put in the body. Validating the ids
+    # first would answer 422 for a well-formed id and 404 otherwise, and that
+    # difference tells an outsider the watchlist exists.
     watchlist = await _own_watchlist(session, user, watchlist_id)
     data = body.model_dump()
+    await _reject_dangling_references(session, data)
     if data.get("country_code"):
         data["country_code"] = data["country_code"].upper()
     item = WatchlistItem(watchlist_id=watchlist.id, **data)

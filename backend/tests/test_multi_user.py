@@ -200,6 +200,111 @@ async def test_watchlists_are_private(client, admin_headers, second_headers, ses
     assert len(mine[0]["items"]) == 1
 
 
+# ------------------------------------------- watchlist items must point at something
+# opportunity_id, trend_id and entity_id are foreign keys, but the handler used to
+# store whatever it was given. The two engines then disagreed: PostgreSQL raised a
+# violation nothing handled and answered 500, while SQLite — which does not enforce
+# foreign keys under this suite — accepted the row and returned 201 with a reference
+# to nothing. These tests pin the behaviour to an explicit check, so both engines
+# answer 422 and no dangling row is ever written.
+async def _new_watchlist(client, headers, name: str = "Things I follow") -> str:
+    created = await client.post("/api/v1/me/watchlists", json={"name": name}, headers=headers)
+    assert created.status_code == 201, created.text
+    return created.json()["id"]
+
+
+async def _items_on_only_watchlist(client, headers) -> list[dict]:
+    lists = (await client.get("/api/v1/me/watchlists", headers=headers)).json()
+    assert len(lists) == 1
+    return lists[0]["items"]
+
+
+@pytest.mark.parametrize(
+    ("item_type", "field", "detail"),
+    [
+        ("opportunity", "opportunity_id", "No such opportunity."),
+        ("trend", "trend_id", "No such trend."),
+        ("company", "entity_id", "No such entity."),
+    ],
+)
+async def test_an_item_referencing_a_nonexistent_row_is_refused(
+    client, admin_headers, item_type, field, detail
+):
+    """A well-formed uuid that names nothing is a 422, and nothing is stored.
+
+    The uuid is syntactically perfect, so this cannot be caught by the schema. It
+    is only wrong about the world, which is exactly the kind of wrong that used to
+    reach the database.
+    """
+    watchlist_id = await _new_watchlist(client, admin_headers)
+
+    response = await client.post(
+        f"/api/v1/me/watchlists/{watchlist_id}/items",
+        json={"item_type": item_type, field: str(uuid.uuid4())},
+        headers=admin_headers,
+    )
+
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"] == detail
+    assert await _items_on_only_watchlist(client, admin_headers) == [], (
+        "a refused item must leave no row behind"
+    )
+
+
+async def test_an_item_referencing_a_real_opportunity_is_still_accepted(
+    client, admin_headers, session
+):
+    """The regression guard: the check must not cost the working case."""
+    opp = await make_opportunity(session, slug="wl-real", title="Real and followable", score=64)
+    watchlist_id = await _new_watchlist(client, admin_headers)
+
+    response = await client.post(
+        f"/api/v1/me/watchlists/{watchlist_id}/items",
+        json={"item_type": "opportunity", "opportunity_id": str(opp.id), "label": "Keep an eye"},
+        headers=admin_headers,
+    )
+
+    assert response.status_code == 201, response.text
+    assert response.json()["opportunity_id"] == str(opp.id)
+    assert response.json()["label"] == "Keep an eye"
+
+    items = await _items_on_only_watchlist(client, admin_headers)
+    assert [i["opportunity_id"] for i in items] == [str(opp.id)]
+
+
+async def test_a_bad_id_on_another_users_watchlist_is_still_a_404(
+    client, admin_headers, second_headers
+):
+    """Ownership is checked before validity, and the error must not leak existence.
+
+    If an invalid id answered 422 here while an unknown watchlist answered 404, the
+    pair of responses would confirm that somebody else's watchlist is real. Both
+    have to be 404, and the body must say nothing more than that.
+    """
+    watchlist_id = await _new_watchlist(client, admin_headers, name="Not yours")
+
+    response = await client.post(
+        f"/api/v1/me/watchlists/{watchlist_id}/items",
+        json={"item_type": "opportunity", "opportunity_id": str(uuid.uuid4())},
+        headers=second_headers,
+    )
+
+    assert response.status_code == 404, response.text
+    assert response.json()["detail"] == "No such watchlist."
+
+    # Indistinguishable from a watchlist id that never existed at all.
+    invented = await client.post(
+        f"/api/v1/me/watchlists/{uuid.uuid4()}/items",
+        json={"item_type": "opportunity", "opportunity_id": str(uuid.uuid4())},
+        headers=second_headers,
+    )
+    assert invented.status_code == response.status_code
+    assert invented.json() == response.json()
+
+    # And the owner's list is untouched by the attempt.
+    assert await _items_on_only_watchlist(client, admin_headers) == []
+
+
 async def test_a_watchlist_can_follow_a_country_or_an_industry(client, admin_headers):
     """A country is as followable as a company. Section 15."""
     watchlist_id = (
