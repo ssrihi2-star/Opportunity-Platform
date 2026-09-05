@@ -19,12 +19,14 @@ network call is made and no live message is sent.
 from __future__ import annotations
 
 import asyncio
+import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.api.v1.telegram import REPLY_OK
 from app.core.config import get_settings
 from app.models.models import NotificationChannelLink
 
@@ -430,6 +432,93 @@ async def test_a_non_json_body_does_not_crash_the_webhook(client):
     assert response.json() == {"ok": True, "handled": False}
 
 
+# ------------------------------------------------------------------ status polling
+async def test_the_owner_can_poll_verification_through_get_me_channels(
+    client, admin_headers, session
+):
+    """Creation -> webhook redemption -> polling must show the link succeeded.
+
+    The regression this pins: `GET /me/channels` is the supported way to watch a
+    link complete, and it has to keep telling the truth across the whole
+    lifecycle. An earlier revision of the legacy verify route tried to serve
+    this purpose and could not — after redemption the code is cleared and
+    `external_id` holds the real chat id, so nothing matched its lookup and a
+    *successful* link reported 404. Anyone polling that route would have shown
+    the user a failure at the exact moment it worked.
+    """
+    chat = "776655"
+
+    # 1. Created: present, pending, and carrying no chat of its own yet.
+    code = await start_link(client, admin_headers)
+    listed = (await client.get("/api/v1/me/channels", headers=admin_headers)).json()
+    assert len(listed) == 1
+    assert listed[0]["channel"] == "telegram"
+    assert listed[0]["verified"] is False
+    assert listed[0]["verified_at"] is None
+    assert listed[0]["link_code"] is None, "the code is never echoed back by the listing"
+
+    # 2. Redeemed, by Telegram, in a private chat.
+    bound = await client.post(WEBHOOK, json=update(chat, f"/link {code}"), headers={SECRET_HEADER: SECRET})
+    assert bound.status_code == 200
+    assert bound.json()["reply"] == REPLY_OK
+
+    # 3. Polled: the same endpoint now reports success.
+    polled = (await client.get("/api/v1/me/channels", headers=admin_headers)).json()
+    assert len(polled) == 1, "redemption updates the existing row, it does not add one"
+    assert polled[0]["id"] == listed[0]["id"]
+    assert polled[0]["verified"] is True, "polling must reflect the completed link"
+    assert polled[0]["verified_at"] is not None
+    assert polled[0]["link_code"] is None
+
+    # The consumed code is really gone, and the stored chat is the one Telegram
+    # reported rather than anything a caller supplied.
+    stored = (
+        await session.execute(
+            sa.select(NotificationChannelLink).where(NotificationChannelLink.external_id == chat)
+        )
+    ).scalar_one()
+    assert stored.verified is True
+    assert stored.link_code is None, "a consumed code is not retained"
+    assert stored.link_code_expires_at is None
+
+
+async def test_the_legacy_verify_route_404s_once_the_code_is_redeemed(client, admin_headers):
+    """The legacy route's documented behaviour, pinned so it cannot drift.
+
+    It reports on a *pending* link. Once the webhook consumes the code there is
+    no pending link left, so it 404s — and that 404 covers both "never existed"
+    and "already succeeded". The message has to point at `GET /me/channels`,
+    because on its own the status code would read as failure.
+    """
+    code = await start_link(client, admin_headers)
+
+    # While pending: answers, and truthfully says "not yet".
+    pending = await client.post(
+        "/api/v1/me/channels/verify",
+        json={"channel": "telegram", "link_code": code, "external_id": "ignored"},
+        headers=admin_headers,
+    )
+    assert pending.status_code == 200
+    assert pending.json()["verified"] is False
+    assert pending.json()["instructions"], "a pending link still explains what to do"
+
+    await client.post(WEBHOOK, json=update("998877", f"/link {code}"), headers={SECRET_HEADER: SECRET})
+
+    # After redemption: no pending link under that code.
+    done = await client.post(
+        "/api/v1/me/channels/verify",
+        json={"channel": "telegram", "link_code": code, "external_id": "ignored"},
+        headers=admin_headers,
+    )
+    assert done.status_code == 404
+    assert "GET /me/channels" in done.json()["detail"], (
+        "the 404 must send the caller to the endpoint that reports success"
+    )
+
+    # ...while the supported endpoint reports the truth.
+    assert (await client.get("/api/v1/me/channels", headers=admin_headers)).json()[0]["verified"] is True
+
+
 # --------------------------------------------------------- delivery and unlinking
 async def test_an_unverified_link_receives_no_external_delivery(client, admin_headers, session):
     """Section 21, restated against the new flow: pending means nothing is sent."""
@@ -526,52 +615,76 @@ def _apply_migration_0006(sync_conn) -> None:
         module.upgrade()
 
 
-async def test_the_migration_revokes_legacy_telegram_links_and_spares_others(engine):
-    """0006 must invalidate every Telegram binding and leave other channels alone.
+def _columns(sync_conn) -> set[str]:
+    return {r[1] for r in sync_conn.exec_driver_sql("PRAGMA table_info(notification_channel_links)")}
 
-    Driven against the same schema the suite uses, with rows shaped exactly as
-    the insecure flow left them: verified, with a real chat id in external_id.
+
+async def _make_pre_0006_schema(engine) -> str:
+    """Reshape the table to how it looked *before* 0006, and return the user id.
+
+    The suite's schema comes from ``Base.metadata.create_all`` against the
+    current models, which already carry ``link_code_expires_at``. Running the
+    migration against that only ever exercises the "column already present"
+    branch of the guard, so the column add itself goes untested. Dropping the
+    column reproduces the real starting state of an existing deployment.
+
+    Rows are then seeded with raw SQL rather than the ORM, because the mapped
+    class knows about a column this table deliberately no longer has.
     """
     from app.models.models import User
 
     maker = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
     async with maker() as s:
-        user = User(
-            email="legacy@example.org",
-            password_hash="x",
-            full_name="Legacy",
-            role="viewer",
-            is_active=True,
-        )
-        s.add(user)
-        await s.flush()
-
-        s.add_all(
-            [
-                # Verified through the insecure flow.
-                NotificationChannelLink(
-                    user_id=user.id, channel="telegram", external_id="chat-legacy",
-                    link_code=None, verified=True, verified_at=datetime.now(UTC),
-                ),
-                # Outstanding legacy code, never redeemed.
-                NotificationChannelLink(
-                    user_id=user.id, channel="telegram", external_id="pending:oldcode",
-                    link_code="oldcode", verified=False,
-                ),
-                # A different channel, which the defect never touched.
-                NotificationChannelLink(
-                    user_id=user.id, channel="email", external_id="legacy@example.org",
-                    link_code=None, verified=True, verified_at=datetime.now(UTC),
-                ),
-            ]
-        )
+        s.add(User(email="legacy@example.org", password_hash="x", full_name="Legacy",
+                   role="viewer", is_active=True))
         await s.commit()
 
-    # Run the REAL migration function, not a copy of its SQL, so that this test
-    # fails if 0006 itself is ever weakened.
     async with engine.begin() as conn:
-        await conn.run_sync(_apply_migration_0006)
+        user_id = (await conn.exec_driver_sql("SELECT id FROM users LIMIT 1")).scalar_one()
+        await conn.exec_driver_sql(
+            "ALTER TABLE notification_channel_links DROP COLUMN link_code_expires_at"
+        )
+        assert "link_code_expires_at" not in await conn.run_sync(_columns), (
+            "the fixture must start from a genuinely pre-0006 table"
+        )
+        for channel, external_id, code, verified, verified_at in [
+            # Verified through the insecure flow: a real chat id, never proven.
+            ("telegram", "chat-legacy", None, 1, "2026-01-01 00:00:00"),
+            # An outstanding legacy code, issued under the old rules.
+            ("telegram", "pending:oldcode", "oldcode", 0, None),
+            # A different channel, which the defect never touched.
+            ("email", "legacy@example.org", None, 1, "2026-01-01 00:00:00"),
+        ]:
+            await conn.exec_driver_sql(
+                "INSERT INTO notification_channel_links"
+                " (id,user_id,channel,external_id,link_code,verified,verified_at,"
+                "  created_at,updated_at)"
+                " VALUES (?,?,?,?,?,?,?,datetime('now'),datetime('now'))",
+                (uuid.uuid4().hex, user_id, channel, external_id, code, verified, verified_at),
+            )
+    return user_id
 
+
+async def test_the_migration_upgrades_a_legacy_table_without_the_expiry_column(engine):
+    """0006 against the schema an existing deployment actually has.
+
+    Three things have to hold at once: the new column is added, every Telegram
+    binding and outstanding code is invalidated, and no other channel is
+    disturbed. The migration's own ``upgrade()`` is executed — not a copy of its
+    SQL — so this fails if 0006 is ever weakened.
+    """
+    await _make_pre_0006_schema(engine)
+
+    async with engine.begin() as conn:
+        before = await conn.run_sync(_columns)
+        assert "link_code_expires_at" not in before
+        await conn.run_sync(_apply_migration_0006)
+        after = await conn.run_sync(_columns)
+
+    assert "link_code_expires_at" in after, "the migration adds the expiry column"
+    assert before | {"link_code_expires_at"} == after, "and changes no other column"
+
+    maker = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
     async with maker() as s:
         rows = (await s.execute(sa.select(NotificationChannelLink))).scalars().all()
         telegram_rows = [r for r in rows if r.channel == "telegram"]
@@ -582,8 +695,36 @@ async def test_the_migration_revokes_legacy_telegram_links_and_spares_others(eng
             assert r.verified is False, "every legacy Telegram binding is revoked"
             assert r.verified_at is None
             assert r.link_code is None, "outstanding legacy codes are cleared"
+            assert r.link_code_expires_at is None
             assert r.external_id.startswith("revoked:"), "the chat slot is freed"
+        assert len({r.external_id for r in telegram_rows}) == 2, (
+            "each placeholder stays unique, or ux_channel_external would be violated"
+        )
+        # The old chat id is gone entirely, so its rightful owner can relink it.
+        assert "chat-legacy" not in {r.external_id for r in telegram_rows}
 
         assert len(email_rows) == 1
         assert email_rows[0].verified is True, "other channels are preserved"
+        assert email_rows[0].verified_at is not None
         assert email_rows[0].external_id == "legacy@example.org"
+
+
+async def test_the_migration_is_safe_to_re_run_on_an_already_upgraded_schema(engine):
+    """The guarded column add must not fail when the column is already there.
+
+    This is the other branch of ``_has_column`` — the case a re-run, or a
+    deployment already carrying the current models, actually hits.
+    """
+    await _make_pre_0006_schema(engine)
+
+    async with engine.begin() as conn:
+        await conn.run_sync(_apply_migration_0006)
+    async with engine.begin() as conn:
+        await conn.run_sync(_apply_migration_0006)  # must not raise
+        assert "link_code_expires_at" in await conn.run_sync(_columns)
+
+    maker = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+    async with maker() as s:
+        rows = (await s.execute(sa.select(NotificationChannelLink))).scalars().all()
+        assert all(r.verified is False for r in rows if r.channel == "telegram")
+        assert all(r.verified is True for r in rows if r.channel == "email")

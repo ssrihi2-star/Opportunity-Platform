@@ -618,7 +618,7 @@ async def verify_channel_link(
     session: AsyncSession = Depends(db_session),
     user: User = Depends(current_user),
 ) -> ChannelLinkOut:
-    """Report the status of a pending link. It can no longer *grant* one.
+    """Legacy endpoint. Reports on a *pending* link; it can no longer grant one.
 
     This endpoint used to take a `link_code` the caller had just been issued
     together with an `external_id` the caller simply asserted, and set
@@ -629,42 +629,61 @@ async def verify_channel_link(
 
     Verification now happens in the only place that can actually witness the
     chat — the webhook, from an update Telegram itself delivered. The route is
-    kept so existing clients get a truthful answer rather than a 404, but the
-    `external_id` they send is ignored on purpose: nothing a caller asserts
-    about which chat they own may influence the binding.
+    kept so existing clients still parse a response, but the `external_id` they
+    send is ignored on purpose: nothing a caller asserts about which chat they
+    own may influence the binding.
 
-    Poll here, or `GET /me/channels`, to watch `verified` flip once the user has
-    sent `/link <code>` to the bot.
+    **Use `GET /me/channels` to poll for verification.** That is the supported
+    way to watch `verified` flip, and the only one that keeps working after the
+    link succeeds.
+
+    Behaviour of *this* route, stated exactly, because it is easy to misread:
+
+    * While the code is outstanding, it returns ``200`` with
+      ``verified: false`` and the linking instructions.
+    * Once the webhook redeems the code, the code is consumed and cleared — it
+      is deliberately not retained, since a code that survives its use is a
+      credential that never expires. Nothing then matches the lookup, so this
+      route returns ``404``.
+
+    That ``404`` therefore means "no link is pending under this code", which
+    covers *both* a code that never existed and one that has already been
+    redeemed successfully. It is not an error signal and must not be read as
+    failure: a client that treats it as one will report a successful link as
+    broken. Check `GET /me/channels` to find out which happened.
+
+    Because a row only carries a `link_code` while it is unredeemed, the
+    `verified` field in this response is always ``false``.
     """
     link = (
         await session.execute(
             sa.select(NotificationChannelLink).where(
                 NotificationChannelLink.user_id == user.id,
                 NotificationChannelLink.channel == body.channel,
-                sa.or_(
-                    NotificationChannelLink.link_code == body.link_code,
-                    # Already redeemed through the webhook: the code is cleared,
-                    # so match the placeholder the pending row was created with.
-                    NotificationChannelLink.external_id
-                    == telegram.pending_placeholder(body.link_code),
-                ),
+                NotificationChannelLink.link_code == body.link_code,
             )
         )
     ).scalar_one_or_none()
     if link is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "No pending link with that code.")
+        # Either never issued, or already redeemed through the webhook. The two
+        # are indistinguishable here by design, and `GET /me/channels` is where
+        # a client learns which.
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            "No pending link with that code. If you have already sent /link to the bot, "
+            "check GET /me/channels — the link may have completed successfully.",
+        )
 
+    # Reached only while the code is still outstanding, so `verified` is false
+    # and the instructions are still what the user needs. Both are read from the
+    # row rather than hardcoded, so this stays truthful if that ever changes.
     return ChannelLinkOut(
         id=link.id,
         channel=link.channel,
         verified=link.verified,
         verified_at=link.verified_at,
         link_code=None,
-        instructions=(
-            None
-            if link.verified
-            else LINK_INSTRUCTIONS.get(link.channel, "").format(code=body.link_code) or None
-        ),
+        instructions=LINK_INSTRUCTIONS.get(link.channel, "").format(code=body.link_code) or None,
     )
 
 

@@ -45,7 +45,8 @@ they do not control.
    │                        │                          ├──────────────────►│
    │                        │       chat id comes from HERE, not the user  │
    │                        │◄─── atomic claim: code → verified binding ───┤
-   │  GET /me/channels  ────►  verified: true                              │
+   │                        │      (no message is sent back to the chat)   │
+   │  GET /me/channels  ────►  verified: true   ◄── the only confirmation  │
 ```
 
 ---
@@ -154,18 +155,30 @@ To stop receiving updates entirely: `deleteWebhook`.
 3. Telegram calls the webhook. The code is consumed and the chat is bound.
 4. `GET /api/v1/me/channels` now shows `verified: true`.
 
-The bot answers with one of four fixed replies:
+> **The user sees nothing in the chat.** The bot does not send a message back.
+> Step 4 — `GET /api/v1/me/channels` showing `verified: true` — is the only
+> confirmation a user gets, so any UI built on this should poll it and say so.
 
-| Situation | Reply |
-| --- | --- |
-| Bound successfully | `Linked. Alerts for your account will arrive in this chat.` |
-| Unknown, expired, **or already used** code | `That link code is not valid, has expired, or has already been used.` |
-| Chat already belongs to an account | `This chat is already linked to an account. One chat, one account.` |
-| Sent in a group, supergroup or channel | `Linking only works in a direct message with the bot, not in a group or channel.` |
+The webhook classifies each `/link` attempt into one of four outcomes. These
+strings are returned in the webhook's **HTTP response body**, as
+`{"ok": true, "handled": true, "reply": "..."}`. Telegram discards that body:
+it is there for operators reading logs and for the test suite, **not** for the
+user. Nothing is delivered into the chat.
 
-The first three of those situations share one reply on purpose. Distinguishing
-"never existed" from "expired" from "already used" would turn the bot into an
-oracle confirming whether a guessed code was ever real.
+| Situation | HTTP response `reply` string | Logged outcome |
+| --- | --- | --- |
+| Bound successfully | `Linked. Alerts for your account will arrive in this chat.` | `linked` |
+| Unknown, expired, **or already used** code | `That link code is not valid, has expired, or has already been used.` | `rejected_code` |
+| Chat already belongs to an account | `This chat is already linked to an account. One chat, one account.` | `chat_already_linked` |
+| Sent in a group, supergroup or channel | `Linking only works in a direct message with the bot, not in a group or channel.` | `not_private_chat` |
+
+The wording is phrased as though addressed to a user because it is ready to be
+sent as a chat message the day an outbound `sendMessage` call is added. Until
+then it is only ever an HTTP response.
+
+The first three situations share one string on purpose. Distinguishing "never
+existed" from "expired" from "already used" would make the endpoint an oracle
+confirming whether a guessed code was ever real.
 
 ### Rules enforced
 
@@ -188,12 +201,35 @@ oracle confirming whether a guessed code was ever real.
   readable `/link` command returns `200 {"ok": true, "handled": false}`. A
   non-2xx would make Telegram retry the same broken update indefinitely.
 
-### `POST /me/channels/verify` is now status-only
+### Polling: use `GET /me/channels`
 
-The route still exists so existing clients get a truthful answer instead of a
-`404`, but it **cannot grant verification**, and the `external_id` in the
-request body is **ignored**. It reports the current `verified` state and
-nothing more. `GET /me/channels` is the better way to poll.
+**`GET /api/v1/me/channels` is the supported way to watch a link complete.** It
+lists the caller's own links with their current `verified` and `verified_at`,
+and keeps working before, during and after redemption. `link_code` is never
+echoed back by the listing.
+
+### `POST /me/channels/verify` is legacy, and reports on *pending* links only
+
+The route still exists so existing clients keep parsing a response, but it
+**cannot grant verification**, and the `external_id` in the request body is
+**ignored**.
+
+Its behaviour is worth stating exactly, because it is easy to misread:
+
+| When | Response |
+| --- | --- |
+| Code outstanding | `200`, `verified: false`, plus the linking instructions |
+| Code redeemed by the webhook | `404` |
+| Code never existed | `404` |
+
+Once the webhook redeems a code, the code is consumed and cleared — a code that
+survived its use would be a credential that never expires — so no pending link
+matches and the route returns `404`. **That `404` is not a failure signal.** It
+means "nothing is pending under this code", which covers a successful link just
+as much as a bogus one; its message points the caller at `GET /me/channels` to
+find out which. A client that treats it as an error will report a working link
+as broken. Because a row carries a `link_code` only while unredeemed, the
+`verified` field in a `200` from this route is always `false`.
 
 Unlinking is unchanged and remains owner-only:
 `DELETE /api/v1/me/channels/{link_id}`, which 404s for anyone else's link. After
@@ -291,24 +327,40 @@ DELETE FROM notification_channel_links
   If a user hands their code to somebody else and that person pastes it into
   *their* chat first, that chat wins. The short TTL and single use limit the
   window; the instructions tell users not to share the code.
-- **Concurrency is proven on SQLite in tests.** The atomic-claim behaviour is
-  covered by the test suite running on SQLite, which serialises writers. The
-  same single-statement claim plus the unique constraint is what makes it safe
-  on PostgreSQL, but genuinely parallel PostgreSQL contention is not exercised
-  in CI unless `TEST_POSTGRES_URL` is set.
-- **The bot does not reply in-chat.** The webhook returns its reply text in the
-  HTTP response body, which Telegram discards. Users confirm success in the app
-  rather than in the chat. Sending a real message back would need an outbound
-  `sendMessage` call, which was out of scope here.
+- **Concurrent redemption is exercised on SQLite only.** The concurrency test in
+  `tests/test_telegram_binding.py` runs against the suite's in-memory SQLite
+  database, which serialises writers — so it demonstrates that the claim logic
+  is correct, not that it holds under genuinely parallel contention.
+
+  Setting `TEST_POSTGRES_URL` does **not** change this. That variable gates the
+  four unrelated tests in `tests/test_postgres_integrity.py`; no Telegram test
+  runs against PostgreSQL under any configuration today. Safety on PostgreSQL
+  rests on the design — a single `UPDATE` that both tests and consumes the code,
+  plus the `ux_channel_external` unique constraint — which is a reasoned
+  argument, not a measured result. Verifying it would mean adding a Telegram
+  concurrency test that runs on a real PostgreSQL database.
+- **The bot never writes to the chat.** Outcome strings are HTTP responses to
+  Telegram, which discards them (see §4). Users confirm success in the app, via
+  `GET /me/channels`. Replying in-chat would need an outbound `sendMessage`
+  call, which was out of scope here.
 
 ---
 
 ## 7. Tests
 
-`backend/tests/test_telegram_binding.py` — 40 tests, all Telegram traffic
+`backend/tests/test_telegram_binding.py` — 43 tests, all Telegram traffic
 synthetic; no network call is made and no live message is sent. They cover the
-removed bypass, secret-header authentication and fail-closed behaviour,
-code expiry, replay and single use, group/channel refusal, one-chat-one-account,
+removed bypass, secret-header authentication and fail-closed behaviour, code
+expiry, replay and single use, group/channel refusal, one-chat-one-account,
 concurrent redemption, malformed updates, delivery gating on `verified`,
-owner-only unlinking, and the migration's effect on existing rows (by executing
-the real `upgrade()` from revision `0006`, not a copy of its SQL).
+owner-only unlinking, the full create → redeem → poll lifecycle through
+`GET /me/channels`, and the legacy verify route's post-redemption `404`.
+
+Two migration tests execute the real `upgrade()` from revision `0006` rather
+than a copy of its SQL: one against a table that genuinely lacks
+`link_code_expires_at` (the state of an existing deployment, so the column add
+is actually exercised), and one re-running it on an already-upgraded schema to
+prove the guard is idempotent.
+
+All of the above run on SQLite. See §6 for what that does and does not
+establish about PostgreSQL.
