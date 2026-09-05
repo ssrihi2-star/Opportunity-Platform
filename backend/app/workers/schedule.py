@@ -81,14 +81,19 @@ def due_digest_frequencies(
     *,
     now: datetime | None = None,
     timezone_name: str = "UTC",
-    weekly_day: str = "sunday",
+    weekly_day: str = "monday",
 ) -> list[str]:
     """Which digest frequencies this run owes, judged on the *local* day.
 
     Daily digests are owed every run. A weekly digest is owed on the run that
     falls on the configured local day, which is why the day is resolved in
-    `timezone_name` rather than in UTC: for an operator in Auckland, a Sunday
-    digest generated at 03:00 UTC is a Monday morning surprise.
+    `timezone_name` rather than in UTC: for an operator in Auckland, a digest
+    generated at 03:00 UTC on what is already the next local day is a surprise.
+
+    Each frequency owed here covers the most recently *completed* canonical
+    period — see `alerts.digest_period`. The default day is Monday so that the
+    weekly digest summarises the ISO week that closed a few hours earlier rather
+    than one that closed six days ago.
     """
     day = normalize_weekday(weekly_day)
     local = (now or datetime.now(UTC)).astimezone(ZoneInfo(timezone_name))

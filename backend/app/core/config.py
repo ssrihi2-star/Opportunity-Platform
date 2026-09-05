@@ -133,7 +133,14 @@ class Settings(BaseSettings):
     #: run also writes weekly digests. Weekly digests are part of that ordered
     #: run rather than a separate cron entry, so they too are written only after
     #: the monitoring they summarise has committed.
-    DIGEST_WEEKLY_DAY: str = "sunday"
+    #:
+    #: Monday by default, because a digest covers the most recently *completed*
+    #: canonical period: a Monday run summarises the ISO week (Monday 00:00 to
+    #: Monday 00:00 local) that closed hours earlier. Choosing `sunday` is
+    #: allowed and still exactly one digest per week, but the week it summarises
+    #: closed on the previous Monday — six days before the run — so it reads
+    #: that much staler.
+    DIGEST_WEEKLY_DAY: str = "monday"
 
     @property
     def cors_origins(self) -> list[str]:

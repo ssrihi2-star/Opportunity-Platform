@@ -200,9 +200,19 @@ request, over an already-decided result.
   Telegram/SMTP *before* the transaction recording the send commits. Redelivering
   a batch that had already sent part of itself would send that part again. They
   recover through the next scheduled run and the unique `(user_id, dedupe_key)`
-  constraint instead. Digests — stored rows, no external send — do retry, with a
-  bounded backoff and only over the periods that rolled back. `docs/scheduling.md`
-  states the whole guarantee, including the crash window it cannot close.
+  constraint instead — best-effort delivery, not at-least-once: duplicate
+  database records are constrained for one dedupe identity, external delivery can
+  still be lost or repeated, and equivalent regenerated events may carry
+  different identities.
+* `digests` is unique on `(user_id, frequency, period_key)`, where `period_key`
+  names a canonical period (`daily:2026-09-06`, `weekly:2026-W36`) rather than
+  the instant the task ran. Digests are stored rows with no external send, so
+  they are the one phase that retries: bounded, and only over the periods that
+  rolled back, with each retry carrying the original period key and boundaries so
+  a retry after midnight still writes the period it was scheduled for. On-demand
+  digests keep a NULL key and stay repeatable. A digest is a row the user reads in
+  the application; **no channel delivers it**. `docs/scheduling.md` states the
+  whole guarantee, including the crash window it cannot close.
 * Partial source failure is normal: an adapter returns what it managed to fetch and
   raises `PartialFetchError` carrying those records; the run is marked `partial`.
 

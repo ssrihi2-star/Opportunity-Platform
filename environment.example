@@ -84,15 +84,22 @@ COLLECT_MINUTE=0
 REAP_EVERY_MINUTES=15
 # How far back a scheduled monitoring run looks for change events. Keep it at
 # least as wide as the gap between two runs, so a run that failed or was killed
-# is picked up by the next one; events already delivered are suppressed by the
-# unique constraint on (user_id, dedupe_key), not sent again.
+# is picked up by the next one. Events already delivered are suppressed by the
+# unique constraint on (user_id, dedupe_key) — but this is a second chance, not a
+# queue: delivery is best-effort, and docs/scheduling.md says exactly what can
+# still be lost or repeated.
 MONITOR_LOOKBACK_HOURS=26
 # How many of the most recent events inside that window one run considers.
 MONITOR_EVENT_LIMIT=500
 # Day name (monday..sunday) in SCHEDULE_TIMEZONE on which the nightly run also
 # writes weekly digests. A name, not a number: cron counts days from Sunday and
-# Python counts them from Monday.
-DIGEST_WEEKLY_DAY=sunday
+# Python counts them from Monday. A digest always covers the most recently
+# COMPLETED canonical period — the local calendar day before the run, or the ISO
+# week (Monday 00:00 to Monday 00:00 local) that closed before it — so monday
+# means "the week that closed a few hours ago", while sunday means the week that
+# closed six days earlier. Either way it is exactly one weekly digest per week;
+# the day only changes how fresh that week is.
+DIGEST_WEEKLY_DAY=monday
 
 # -------------------------------------------------------------------- frontend
 NEXT_PUBLIC_API_URL=http://localhost:8000/api/v1

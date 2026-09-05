@@ -14,6 +14,7 @@ from typing import Any
 import httpx
 
 from app.core.config import get_settings
+from app.core.errors import failure_code, is_unrecoverable
 from app.core.logging import get_logger
 from app.notifications.base import (
     NotificationMessage,
@@ -85,8 +86,21 @@ class EmailProvider(NotificationProvider):
                     server.login(settings.SMTP_USERNAME, settings.SMTP_PASSWORD)
                 server.send_message(mail)
         except Exception as exc:  # noqa: BLE001 - a failed send is data, not a crash
-            logger.warning("notification.email_failed", error=str(exc))
-            return ProviderResult(delivered=False, detail=f"SMTP delivery failed: {exc}")
+            if is_unrecoverable(exc):
+                raise
+            # The class name only. An smtplib exception carries the server's
+            # reply and the recipient address, and `detail` is not just a log
+            # line: it is persisted to `alert_deliveries.suppressed_reason`.
+            logger.warning(
+                "notification.email_failed", outcome="delivery_failed", error_type=failure_code(exc)
+            )
+            return ProviderResult(
+                delivered=False,
+                detail=(
+                    f"SMTP delivery failed ({failure_code(exc)}). The alert is still readable in the "
+                    "application."
+                ),
+            )
         return ProviderResult(delivered=True, detail=f"Emailed to {address}.", live=True)
 
 
@@ -129,8 +143,22 @@ class TelegramProvider(NotificationProvider):
                     detail=f"Telegram refused the message: HTTP {response.status_code}.",
                 )
         except Exception as exc:  # noqa: BLE001 - network failure is data, not a crash
-            logger.warning("notification.telegram_failed", error=str(exc))
-            return ProviderResult(delivered=False, detail=f"Telegram delivery failed: {exc}")
+            if is_unrecoverable(exc):
+                raise
+            # The class name only, and never the URL: the send URL contains the
+            # bot token, and httpx puts the URL in the exception text. `detail`
+            # is persisted to `alert_deliveries.suppressed_reason`, so leaking it
+            # there would write a credential into a row users can read.
+            logger.warning(
+                "notification.telegram_failed", outcome="delivery_failed", error_type=failure_code(exc)
+            )
+            return ProviderResult(
+                delivered=False,
+                detail=(
+                    f"Telegram delivery failed ({failure_code(exc)}). The alert is still readable in "
+                    "the application."
+                ),
+            )
         return ProviderResult(delivered=True, detail="Sent to Telegram.", live=True)
 
 

@@ -38,7 +38,7 @@ from pathlib import Path
 import pytest
 import pytest_asyncio
 import sqlalchemy as sa
-from celery.exceptions import Retry
+from celery.exceptions import Retry, SoftTimeLimitExceeded
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.config import get_settings
@@ -54,6 +54,7 @@ from app.models.models import (
 )
 from app.notifications import base as notification_base
 from app.notifications.base import NotificationMessage, ProviderResult
+from app.services.alerts import digest_period
 from app.workers import tasks
 from app.workers.celery_app import celery_app
 from app.workers.locks import is_postgresql, lock_key, try_advisory_xact_lock
@@ -341,6 +342,7 @@ async def test_the_run_leaves_an_audit_trail_of_counts_not_of_content(session, w
     assert recorded.actor_label == "system"
     assert recorded.after["alerts_sent"] == 1
     assert recorded.after["events"] == 1
+    assert recorded.after["alerts_failed"] == 0
     # Counts, not copies: an audit log is readable by administrators and must
     # not become a second store of notification bodies.
     serialised = json.dumps(recorded.after)
@@ -379,6 +381,7 @@ async def test_a_run_that_finds_nothing_reports_that_honestly(session, worker_db
         "events_considered": 0,
         "alerts_sent": 0,
         "alerts_suppressed": 0,
+        "alerts_failed": 0,
     }
 
 
@@ -529,7 +532,7 @@ async def test_an_overlapping_run_stops_before_the_digests(session, worker_db, m
 
     async def spy_digests(**kwargs):  # noqa: ANN003
         calls.append("digests")
-        return {"phase": "digests", "status": "ok", "frequencies": {}, "failed": [], "skipped": []}
+        return {"phase": "digests", "status": "ok", "periods": [], "failed_periods": [], "skipped": []}
 
     monkeypatch.setattr(tasks, "try_advisory_xact_lock", refuse)
     monkeypatch.setattr(tasks, "_run_all", _async_returning([]))
@@ -559,7 +562,12 @@ async def test_a_monitoring_failure_commits_nothing_and_is_not_retried(session, 
     monkeypatch.setattr(tasks, "dispatch", explode)
     result = await tasks.run_monitoring_phase(now=datetime(2026, 9, 7, 3, 0, tzinfo=UTC))
 
-    assert result == {"phase": "monitoring", "status": "failed", "reason": "RuntimeError"}
+    assert result == {
+        "phase": "monitoring",
+        "status": "failed",
+        "reason_code": "monitoring_failed",
+        "error_type": "RuntimeError",
+    }
     assert (await session.execute(sa.select(AlertDelivery))).scalars().all() == []
     assert (await session.execute(sa.select(SystemAuditLog))).scalars().all() == []
     assert tasks.task_run_monitoring.max_retries == 0
@@ -580,10 +588,36 @@ def test_the_tasks_that_send_are_configured_not_to_repeat_a_batch():
     assert tasks.task_run_nightly_pipeline.soft_time_limit < tasks.task_run_nightly_pipeline.time_limit
 
 
+def _same_instant(stored: datetime, expected: datetime) -> bool:
+    """Compare a stored boundary with the one the period says it should be.
+
+    SQLite's `DateTime(timezone=True)` hands back a naive wall-clock value, so
+    the comparison has to be made in the period's own zone; PostgreSQL stores the
+    instant and hands it back aware. The zone the boundaries belong to is
+    recorded on the row itself, in `sections["period"]["timezone"]`.
+    """
+    if stored.tzinfo is None:
+        return stored == expected.replace(tzinfo=None)
+    return stored == expected
+
+
 # -------------------------------------------------------------------- ordering
 def _async_returning(value):
     async def _stub(*_args, **_kwargs):  # noqa: ANN002, ANN003
         return value
+
+    return _stub
+
+
+def _digest_phase_stub(status="ok", periods=None, failed_periods=None):
+    async def _stub(**_kwargs):  # noqa: ANN003
+        return {
+            "phase": "digests",
+            "status": status,
+            "periods": periods or [],
+            "failed_periods": failed_periods or [],
+            "skipped": [],
+        }
 
     return _stub
 
@@ -593,11 +627,13 @@ async def test_digests_wait_for_the_monitoring_they_summarise(session, worker_db
 
     async def failing_monitor(**_kwargs):  # noqa: ANN003
         calls.append("monitoring")
-        return {"phase": "monitoring", "status": "failed", "reason": "RuntimeError"}
+        return {"phase": "monitoring", "status": "failed", "reason_code": "monitoring_failed"}
+
+    stub = _digest_phase_stub()
 
     async def spy_digests(**_kwargs):  # noqa: ANN003
         calls.append("digests")
-        return {"phase": "digests", "status": "ok", "frequencies": {}, "failed": [], "skipped": []}
+        return await stub(**_kwargs)
 
     monkeypatch.setattr(tasks, "_run_all", _async_returning([]))
     monkeypatch.setattr(tasks, "run_monitoring_phase", failing_monitor)
@@ -628,17 +664,20 @@ async def test_a_collection_failure_stops_the_whole_run(session, worker_db, monk
 
     assert calls == []
     assert report["status"] == "aborted"
-    assert report["phases"]["collect"]["reason"] == "RuntimeError"
+    assert report["phases"]["collect"]["error_type"] == "RuntimeError"
+    assert report["phases"]["collect"]["reason_code"] == "collect_failed"
 
 
 async def test_one_bad_source_does_not_cost_the_night(session, worker_db, monkeypatch):
-    """Per-source failure is normal and recorded; it is not a reason to skip alerts."""
+    """Per-source failure is recorded, and is not a reason to skip alerts."""
     user = await make_user(session, email="partial@example.org", digest_frequency=DigestFrequency.DAILY.value)
     await make_confirmed_opportunity(session, slug="sched-partial")
     await make_rule(session, user, trigger="confirmation_met", cooldown_hours=0)
 
     monkeypatch.setattr(
-        tasks, "_run_all", _async_returning([{"source": "broken", "error": "HTTP 503"}, {"source": "fine"}])
+        tasks,
+        "_run_all",
+        _async_returning([{"source": "broken", "error": "RuntimeError"}, {"source": "fine"}]),
     )
     report = await tasks.run_nightly_pipeline(now=datetime(2026, 9, 7, 3, 0, tzinfo=UTC))
 
@@ -650,7 +689,7 @@ async def test_one_bad_source_does_not_cost_the_night(session, worker_db, monkey
     }
     assert report["phases"]["monitoring"]["alerts_sent"] == 1
     assert report["status"] == "degraded", "the run finished, but the operator should see the bad source"
-    assert (await session.execute(sa.select(Digest))).scalars().all(), "digests still owed to the user"
+    assert (await session.execute(sa.select(Digest))).scalars().all(), "the digest was still owed"
 
 
 async def test_the_whole_ordered_run_end_to_end(session, worker_db):
@@ -658,45 +697,64 @@ async def test_the_whole_ordered_run_end_to_end(session, worker_db):
     daily_user = await make_user(
         session, email="daily@example.org", digest_frequency=DigestFrequency.DAILY.value
     )
-    await make_confirmed_opportunity(session, slug="sched-pipeline")
-    await make_rule(session, daily_user, trigger="confirmation_met", cooldown_hours=0)
-    # The helper above creates a source to hang its observations on, and sources
-    # ship enabled. Disabling it keeps the collection phase empty: this test is
-    # about ordering, and ingestion is covered in test_ingestion.py.
-    await session.execute(sa.update(Source).values(enabled=False))
-    await session.commit()
-
-    now = datetime(2026, 9, 7, 3, 0, tzinfo=UTC)  # a Monday
-    report = await tasks.run_nightly_pipeline(now=now)
-
-    assert [name for name in report["phases"]] == ["collect", "monitoring", "digests"]
-    assert report["status"] == "ok"
-    assert report["phases"]["monitoring"]["alerts_sent"] == 1
-    # Monday, and the default weekly day is Sunday: one daily digest only.
-    assert report["phases"]["digests"]["frequencies"] == {"daily": 1}
-    digests = (await session.execute(sa.select(Digest))).scalars().all()
-    assert [d.frequency for d in digests] == [DigestFrequency.DAILY.value]
-    assert digests[0].user_id == daily_user.id
-    assert (await session.execute(sa.select(AlertDelivery))).scalars().all()
-
-
-async def test_the_weekly_digest_joins_the_run_on_its_local_day(session, worker_db):
     weekly_user = await make_user(
         session, email="weekly@example.org", digest_frequency=DigestFrequency.WEEKLY.value
     )
-    daily_user = await make_user(
-        session, email="everyday@example.org", digest_frequency=DigestFrequency.DAILY.value
-    )
+    await make_confirmed_opportunity(session, slug="sched-pipeline")
+    await make_rule(session, daily_user, trigger="confirmation_met", cooldown_hours=0)
+    await session.execute(sa.update(Source).values(enabled=False))
+    await session.commit()
 
-    sunday = datetime(2026, 9, 6, 3, 0, tzinfo=UTC)
-    report = await tasks.run_nightly_pipeline(now=sunday)
+    # Monday 03:00 UTC. The daily period that closed is Sunday; the ISO week that
+    # closed at Monday 00:00 is owed to the weekly subscriber three hours later.
+    report = await tasks.run_nightly_pipeline(now=datetime(2026, 9, 7, 3, 0, tzinfo=UTC))
 
-    assert set(report["phases"]["digests"]["frequencies"]) == {"daily", "weekly"}
+    assert list(report["phases"]) == ["collect", "monitoring", "digests"]
+    assert report["status"] == "ok"
+    assert report["phases"]["monitoring"]["alerts_sent"] == 1
+    by_key = {entry["period_key"]: entry for entry in report["phases"]["digests"]["periods"]}
+    assert set(by_key) == {"daily:2026-09-06", "weekly:2026-W36"}
+    assert by_key["daily:2026-09-06"]["written"] == 1
+    assert by_key["weekly:2026-W36"]["written"] == 1
+
     rows = (await session.execute(sa.select(Digest))).scalars().all()
-    assert {(row.user_id, row.frequency) for row in rows} == {
-        (daily_user.id, DigestFrequency.DAILY.value),
-        (weekly_user.id, DigestFrequency.WEEKLY.value),
+    assert {(row.user_id, row.period_key) for row in rows} == {
+        (daily_user.id, "daily:2026-09-06"),
+        (weekly_user.id, "weekly:2026-W36"),
     }
+
+
+async def test_the_weekly_digest_joins_the_run_on_its_local_day(session, worker_db):
+    await make_user(session, email="everyday@example.org", digest_frequency=DigestFrequency.DAILY.value)
+
+    # Sunday is not the configured weekly day, so only the daily period is owed.
+    report = await tasks.run_nightly_pipeline(now=datetime(2026, 9, 6, 3, 0, tzinfo=UTC))
+    assert [entry["period_key"] for entry in report["phases"]["digests"]["periods"]] == ["daily:2026-09-05"]
+
+
+async def test_the_local_timezone_decides_which_day_is_yesterday(session, worker_db, monkeypatch):
+    """22:00 UTC on the 6th is already the 7th in Auckland.
+
+    The period owed is therefore Auckland's 6th, not UTC's 6th: a wall clock the
+    operator configured decides what "yesterday" means, and the boundaries stored
+    on the row are that local day's midnights.
+    """
+    monkeypatch.setenv("SCHEDULE_TIMEZONE", "Pacific/Auckland")
+    get_settings.cache_clear()
+    await make_user(session, email="auckland@example.org", digest_frequency=DigestFrequency.DAILY.value)
+    instant = datetime(2026, 9, 6, 22, 0, tzinfo=UTC)
+
+    try:
+        await tasks.run_digest_phase(now=instant)
+
+        digest = (await session.execute(sa.select(Digest))).scalars().one()
+        assert digest.period_key == "daily:2026-09-06"
+        assert digest.sections["period"]["timezone"] == "Pacific/Auckland"
+        expected = digest_period("daily", now=instant, timezone_name="Pacific/Auckland")
+        assert _same_instant(digest.period_start, expected.start)
+        assert _same_instant(digest.period_end, expected.end)
+    finally:
+        get_settings.cache_clear()
 
 
 # --------------------------------------------------------------------- digests
@@ -722,160 +780,430 @@ async def test_only_users_who_asked_for_a_frequency_get_one(session, worker_db):
     result = await tasks.run_digest_phase(frequencies=["daily"], now=datetime(2026, 9, 7, 3, 0, tzinfo=UTC))
 
     assert result["status"] == "ok"
-    assert result["frequencies"] == {"daily": 1}
+    assert result["periods"] == [
+        {
+            "frequency": "daily",
+            "period_key": "daily:2026-09-06",
+            "timezone": "UTC",
+            "status": "ok",
+            "written": 1,
+            "duplicates": 0,
+            "users_failed": 0,
+        }
+    ]
     rows = (await session.execute(sa.select(Digest))).scalars().all()
-    assert [row.user_id for row in rows] == [asked_daily.id]
-    assert asked_weekly.id not in {row.user_id for row in rows}
-    assert asked_nothing.id not in {row.user_id for row in rows}, "a user who asked for nothing was sent one"
-    assert switched_off.id not in {row.user_id for row in rows}, "a deactivated account was summarised"
-    assert no_profile.id not in {row.user_id for row in rows}
+    assert [(row.user_id, row.period_key) for row in rows] == [(asked_daily.id, "daily:2026-09-06")]
+    written_to = {row.user_id for row in rows}
+    assert asked_weekly.id not in written_to
+    assert asked_nothing.id not in written_to, "a user who asked for nothing was summarised"
+    assert switched_off.id not in written_to, "a deactivated account was summarised"
+    assert no_profile.id not in written_to
 
 
 async def test_a_frequency_that_is_not_a_period_is_refused(session, worker_db):
     """Permanent errors fail loudly instead of being retried or ignored."""
-    with pytest.raises(ValueError, match="cannot be scheduled"):
-        await tasks.run_digest_phase(frequencies=["off"], now=datetime(2026, 9, 7, 3, 0, tzinfo=UTC))
-    with pytest.raises(ValueError, match="cannot be scheduled"):
-        await tasks.run_digest_phase(frequencies=["hourly"], now=datetime(2026, 9, 7, 3, 0, tzinfo=UTC))
+    for bad in ("off", "hourly", ""):
+        with pytest.raises(ValueError, match="digest_frequency_unsupported"):
+            await tasks.run_digest_phase(frequencies=[bad], now=datetime(2026, 9, 7, 3, 0, tzinfo=UTC))
     assert (await session.execute(sa.select(Digest))).scalars().all() == []
 
 
-async def test_a_failed_period_is_rolled_back_and_the_other_survives(session, worker_db, monkeypatch):
-    """Daily is written, weekly fails: the daily digest must not be lost."""
+async def test_a_failed_period_does_not_take_the_other_one_with_it(session, worker_db, monkeypatch):
+    """Each period commits on its own: a weekly failure cannot undo the daily."""
     await make_user(session, email="twoperiods@example.org", digest_frequency=DigestFrequency.DAILY.value)
     real = tasks.run_digests
 
-    async def flaky(session_, *, frequency, now=None):  # noqa: ANN001
+    async def weekly_breaks(session_, *, frequency, now=None, period=None):  # noqa: ANN001
         if frequency == "weekly":
             raise RuntimeError("weekly blew up")
-        return await real(session_, frequency=frequency, now=now)
+        return await real(session_, frequency=frequency, now=now, period=period)
 
-    monkeypatch.setattr(tasks, "run_digests", flaky)
+    monkeypatch.setattr(tasks, "run_digests", weekly_breaks)
     result = await tasks.run_digest_phase(
         frequencies=["daily", "weekly"], now=datetime(2026, 9, 6, 3, 0, tzinfo=UTC)
     )
 
     assert result["status"] == "partial"
-    assert result["frequencies"] == {"daily": 1, "weekly": "failed"}
-    assert result["failed"] == ["weekly"]
+    assert {entry["period_key"]: entry["status"] for entry in result["periods"]} == {
+        "daily:2026-09-05": "ok",
+        "weekly:2026-W35": "failed",
+    }
+    assert [period["key"] for period in result["failed_periods"]] == ["weekly:2026-W35"]
     rows = (await session.execute(sa.select(Digest))).scalars().all()
-    assert [row.frequency for row in rows] == ["daily"], (
-        "the committed period was rolled back with the failed one"
+    assert [row.period_key for row in rows] == ["daily:2026-09-05"], (
+        "the period that succeeded was rolled back with the one that failed"
     )
 
 
+async def test_a_digest_run_reports_what_it_wrote(session, worker_db):
+    await make_user(session, email="reported@example.org", digest_frequency=DigestFrequency.DAILY.value)
+    result = await tasks.run_digest_phase(frequencies=["daily"], now=datetime(2026, 9, 7, 3, 0, tzinfo=UTC))
+    assert result["status"] == "ok"
+    assert result["failed_periods"] == []
+    assert result["skipped"] == []
+    assert result["periods"][0]["written"] == 1
+
+
+# ----------------------------------------------------------------------- retry
 def test_a_transient_digest_failure_is_retried_with_backoff_and_then_stops(monkeypatch):
-    """Bounded, exponential, and only over the frequencies that rolled back.
+    """Bounded, and only over the periods that did not finish.
 
     A synchronous test on purpose: the task body calls `asyncio.run`, which
     cannot be nested inside the loop an `async def` test already owns. Celery's
-    eager path runs the real retry machinery without contacting a broker, and
-    ignores the countdown by design — the delay itself is asserted below.
+    eager path exercises the real retry machinery without a broker, and ignores
+    the countdown by design — the delay itself is asserted in the next test.
     """
+    original = [{"frequency": "daily", "key": "daily:2026-09-06", "timezone": "UTC"}]
     attempts: list[list[str]] = []
 
-    async def always_fail(*, frequencies=None, now=None):  # noqa: ANN001
-        attempts.append(list(frequencies or []))
+    async def always_fail(*, periods=None, frequencies=None, now=None):  # noqa: ANN001
+        attempts.append([period["key"] for period in periods or []])
         return {
             "phase": "digests",
             "status": "failed",
-            "frequencies": {f: "failed" for f in attempts[-1]},
-            "failed": list(attempts[-1]),
+            "periods": [],
+            "failed_periods": [dict(period) for period in periods or []],
             "skipped": [],
         }
 
     monkeypatch.setattr(tasks, "run_digest_phase", always_fail)
-    result = tasks.task_run_digests.apply(kwargs={"frequencies": ["daily", "weekly"]})
+    result = tasks.task_run_digests.apply(kwargs={"periods": original})
 
     assert result.state == "FAILURE"
     assert isinstance(result.result, tasks.DigestPhaseError)
-    assert attempts == [["daily", "weekly"]] * 3, "not bounded at max_retries=2"
+    assert "daily:2026-09-06" in str(result.result)
+    assert attempts == [["daily:2026-09-06"]] * (tasks.DIGEST_MAX_RETRIES + 1), "retries were not bounded"
 
-    # And the successful path: one failure, then a retry that writes them.
+    # The recovering path: one failure, then a retry that finishes the job.
     attempts.clear()
     calls = {"n": 0}
 
-    async def fail_once(*, frequencies=None, now=None):  # noqa: ANN001
+    async def fail_once(*, periods=None, frequencies=None, now=None):  # noqa: ANN001
         calls["n"] += 1
-        attempts.append(list(frequencies or []))
+        attempts.append([period["key"] for period in periods or []])
         if calls["n"] == 1:
             return {
                 "phase": "digests",
-                "status": "failed",
-                "frequencies": {"weekly": "failed"},
-                "failed": ["weekly"],
+                "status": "partial",
+                "periods": [],
+                "failed_periods": [dict(period) for period in periods or []],
                 "skipped": [],
             }
-        return {"phase": "digests", "status": "ok", "frequencies": {"weekly": 1}, "failed": [], "skipped": []}
+        return {"phase": "digests", "status": "ok", "periods": [], "failed_periods": [], "skipped": []}
 
     monkeypatch.setattr(tasks, "run_digest_phase", fail_once)
-    recovered = tasks.task_run_digests.apply(kwargs={"frequencies": ["daily", "weekly"]})
+    recovered = tasks.task_run_digests.apply(kwargs={"periods": original})
+
     assert recovered.state == "SUCCESS"
     assert recovered.result["status"] == "ok"
-    assert attempts == [["daily", "weekly"], ["weekly"]], "the retry re-ran a period that had committed"
+    assert attempts == [["daily:2026-09-06"]] * 2, "the retry lost the period it was given"
 
 
-def test_the_retry_countdown_grows_and_is_capped(monkeypatch):
+def test_the_retry_delays_grow_and_carry_the_original_period(monkeypatch):
+    """Exponential backoff, and the period identity survives every hop.
+
+    `Retry` is what `self.retry` raises to unwind the current attempt, so it is
+    the observable evidence that a retry was requested with these arguments.
+    """
     recorded: dict = {}
 
     def fake_retry(**kwargs):  # noqa: ANN003
         recorded.update(kwargs)
         raise Retry("stop here")
 
-    async def failing(*, frequencies=None, now=None):  # noqa: ANN001
-        return {"phase": "digests", "status": "failed", "frequencies": {}, "failed": ["daily"], "skipped": []}
+    original = [
+        {
+            "frequency": "weekly",
+            "key": "weekly:2026-W36",
+            "start": "2026-08-31T00:00:00+00:00",
+            "end": "2026-09-07T00:00:00+00:00",
+            "timezone": "UTC",
+        }
+    ]
+
+    async def failing(*, periods=None, frequencies=None, now=None):  # noqa: ANN001
+        return {
+            "phase": "digests",
+            "status": "failed",
+            "periods": [],
+            "failed_periods": [dict(period) for period in periods or []],
+            "skipped": [],
+        }
 
     monkeypatch.setattr(tasks, "run_digest_phase", failing)
     monkeypatch.setattr(tasks.task_run_digests, "retry", fake_retry)
-    with pytest.raises(Retry):
-        tasks.task_run_digests.run(frequencies=["daily"])
-    assert recorded["countdown"] == tasks.DIGEST_RETRY_BASE_SECONDS
-    assert recorded["kwargs"] == {"frequencies": ["daily"]}, "the retry must not repeat committed work"
 
-    # Third attempt: past the bound, so it fails instead of retrying again.
-    tasks.task_run_digests.push_request(retries=tasks.task_run_digests.max_retries)
+    with pytest.raises(Retry):
+        tasks.task_run_digests.run(periods=original)
+    assert recorded["countdown"] == tasks.DIGEST_RETRY_BASE_SECONDS
+    assert recorded["kwargs"] == {"periods": original}, "the retry must carry the original period identity"
+
+    # Second attempt: the delay doubles.
+    tasks.task_run_digests.push_request(retries=1)
     try:
-        with pytest.raises(tasks.DigestPhaseError):
-            tasks.task_run_digests.run(frequencies=["daily"])
+        with pytest.raises(Retry):
+            tasks.task_run_digests.run(periods=original)
+        assert recorded["countdown"] == tasks.DIGEST_RETRY_BASE_SECONDS * 2
+
+        # Past the bound: it fails instead of retrying again.
+        tasks.task_run_digests.push_request(retries=tasks.task_run_digests.max_retries)
+        try:
+            with pytest.raises(tasks.DigestPhaseError):
+                tasks.task_run_digests.run(periods=original)
+        finally:
+            tasks.task_run_digests.pop_request()
     finally:
         tasks.task_run_digests.pop_request()
 
 
-async def test_a_digest_run_reports_what_it_wrote(session, worker_db):
-    await make_user(session, email="reported@example.org", digest_frequency=DigestFrequency.DAILY.value)
-    result = await tasks.run_digest_phase(frequencies=["daily"], now=datetime(2026, 9, 7, 3, 0, tzinfo=UTC))
-    assert result == {
-        "phase": "digests",
-        "status": "ok",
-        "frequencies": {"daily": 1},
-        "failed": [],
-        "skipped": [],
+def test_the_total_attempt_limit_is_stated_on_the_task():
+    """One scheduled attempt plus DIGEST_MAX_RETRIES retries — three in total."""
+    assert tasks.DIGEST_MAX_RETRIES == 2
+    assert tasks.task_run_digests.max_retries == tasks.DIGEST_MAX_RETRIES
+    assert tasks.DIGEST_RETRY_BASE_SECONDS > 0
+
+
+async def test_the_pipeline_delegates_a_digest_retry_instead_of_repeating_itself(
+    session, worker_db, monkeypatch
+):
+    """Failed digest work goes to the digest task, never back through collection.
+
+    Re-running the pipeline would re-crawl every source and, worse, re-run the
+    phase that sends alerts. Delegation carries the original period identity, so
+    the retry writes the period that failed rather than a new one.
+    """
+    await make_user(session, email="retry@example.org", digest_frequency=DigestFrequency.DAILY.value)
+    published: list[dict] = []
+    collect_runs = {"n": 0}
+    monitor_runs = {"n": 0}
+    real_monitor = tasks.run_monitoring_phase
+
+    async def counting_collect():  # noqa: ANN202
+        collect_runs["n"] += 1
+        return []
+
+    async def counting_monitor(**kwargs):  # noqa: ANN003
+        monitor_runs["n"] += 1
+        return await real_monitor(**kwargs)
+
+    async def broken_digests(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        raise RuntimeError("digest exploded")
+
+    def fake_apply_async(*_args, **kwargs):  # noqa: ANN002, ANN003
+        published.append(kwargs)
+        return type("Pending", (), {"id": "task-id-1"})()
+
+    monkeypatch.setattr(tasks, "_run_all", counting_collect)
+    monkeypatch.setattr(tasks, "run_monitoring_phase", counting_monitor)
+    monkeypatch.setattr(tasks, "run_digests", broken_digests)
+    monkeypatch.setattr(tasks.task_run_digests, "apply_async", fake_apply_async)
+
+    report = await tasks.run_nightly_pipeline(now=datetime(2026, 9, 7, 3, 0, tzinfo=UTC))
+
+    assert collect_runs["n"] == 1, "collection ran again as part of a digest retry"
+    assert monitor_runs["n"] == 1, "alert dispatch ran again as part of a digest retry"
+    assert report["status"] == "degraded"
+    assert report["phases"]["digests"]["retry"] == {
+        "published": True,
+        "task_id": "task-id-1",
+        "periods": 2,
     }
+    assert len(published) == 1
+    retried = published[0]["kwargs"]["periods"]
+    assert {period["key"] for period in retried} == {"daily:2026-09-06", "weekly:2026-W36"}
+    assert published[0]["countdown"] == tasks.DIGEST_RETRY_BASE_SECONDS
+    for period in retried:
+        assert period["timezone"] == "UTC"
+        assert period["start"] and period["end"], "the boundaries must travel with the key"
 
 
-# ------------------------------------------------------- digest content rules
-async def test_a_scheduled_digest_keeps_watchlist_scoping_and_the_disclaimer(session, worker_db):
-    """The digest written by the schedule is the same one the API writes."""
-    from app.models.models import Watchlist, WatchlistItem
-    from app.services.monitoring import detect_changes
+async def test_a_broker_that_refuses_the_retry_is_reported_not_swallowed(session, worker_db, monkeypatch):
+    """Neither `apply_async` nor `self.retry` removes broker-publish failure.
 
-    run_at = datetime(2026, 9, 7, 3, 0, tzinfo=UTC)
-    user = await make_user(session, email="scoped@example.org", digest_frequency=DigestFrequency.DAILY.value)
-    watched = await make_opportunity(session, slug="digest-watched", title="Watched", score=80.0)
-    other = await make_opportunity(session, slug="digest-other", title="Not watched", score=80.0)
-    watchlist = Watchlist(user_id=user.id, name="Mine")
-    session.add(watchlist)
-    await session.flush()
-    session.add(WatchlistItem(watchlist_id=watchlist.id, item_type="opportunity", opportunity_id=watched.id))
-    for opp in (watched, other):
-        await detect_changes(session, opportunity=opp, previous={"opportunity_score": 50.0}, now=run_at)
-    await session.commit()
+    A Celery task that retries itself re-publishes through the same broker, so if
+    the broker is down the retry is silently dropped. That loss has to be visible
+    in the run's outcome.
+    """
+    await make_user(session, email="nobroker@example.org", digest_frequency=DigestFrequency.DAILY.value)
 
-    await tasks.run_digest_phase(frequencies=["daily"], now=run_at)
+    async def broken_digests(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        raise RuntimeError("digest exploded")
 
-    digest = (await session.execute(sa.select(Digest))).scalars().one()
-    assert [i["title"] for i in digest.sections["watchlist_changes"]] == ["Watched"]
-    assert [i["title"] for i in digest.sections["other_changes"]] == ["Not watched"]
-    assert "not a recommendation" in digest.sections["note"]
-    assert digest.period_end - digest.period_start == timedelta(days=1)
-    assert digest.item_count > 0, "an empty digest would be indistinguishable from a broken pipeline"
+    def refuse(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        raise OSError("broker unreachable")
+
+    monkeypatch.setattr(tasks, "_run_all", _async_returning([]))
+    monkeypatch.setattr(tasks, "run_digests", broken_digests)
+    monkeypatch.setattr(tasks.task_run_digests, "apply_async", refuse)
+
+    report = await tasks.run_nightly_pipeline(now=datetime(2026, 9, 7, 3, 0, tzinfo=UTC))
+
+    assert report["phases"]["digests"]["retry"] == {
+        "published": False,
+        "reason_code": "broker_publish_failed",
+        "error_type": "OSError",
+        "periods": 2,
+    }
+    assert report["status"] == "degraded", "a lost retry must still be visible in the run's outcome"
+
+
+# --------------------------------------------------------------------- logging
+class RecordingLogger:
+    """Stands in for the structlog logger so a test can read what was emitted.
+
+    `structlog.testing.capture_logs` is the obvious tool, but loggers are cached
+    on first use (`cache_logger_on_first_use=True`), so replacing the bound
+    logger is the reliable way to see exactly what a failure path logged.
+    """
+
+    def __init__(self) -> None:
+        self.entries: list[tuple[str, dict]] = []
+
+    def _record(self, event: str, **kwargs: object) -> None:
+        self.entries.append((event, kwargs))
+
+    debug = info = warning = error = exception = _record
+
+    def rendered(self) -> str:
+        return json.dumps([[event, {k: str(v) for k, v in kw.items()}] for event, kw in self.entries])
+
+
+# The kinds of thing an exception message really does carry: a Telegram bot token
+# inside the request URL, a chat id, a link code, SQL parameters, SMTP credentials.
+SECRETISH = (
+    "bot123456:AAFakeTokenThatMustNeverBeLogged",
+    "https://api.telegram.org/bot123456:AAFakeTokenThatMustNeverBeLogged/sendMessage",
+    "chat_id=99887766",
+    "/link 424242",
+    "INSERT INTO alert_deliveries VALUES ('body of a private alert')",
+    "smtp-password=hunter2",
+)
+
+
+def _explosion() -> RuntimeError:
+    return RuntimeError(" ".join(SECRETISH))
+
+
+async def test_a_monitoring_failure_logs_a_class_name_and_nothing_else(session, worker_db, monkeypatch):
+    recorder = RecordingLogger()
+    monkeypatch.setattr(tasks, "log", recorder)
+
+    async def explode(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        raise _explosion()
+
+    monkeypatch.setattr(tasks, "dispatch", explode)
+    result = await tasks.run_monitoring_phase(now=datetime(2026, 9, 7, 3, 0, tzinfo=UTC))
+
+    assert result["error_type"] == "RuntimeError"
+    logged = recorder.rendered()
+    assert "scheduled_monitoring_failed" in logged
+    for secret in SECRETISH:
+        assert secret not in logged, f"a failure log carried {secret[:32]}..."
+    entry = next(kw for event, kw in recorder.entries if event == "scheduled_monitoring_failed")
+    assert entry["error_type"] == "RuntimeError"
+    assert "error" not in entry, "raw exception text was logged"
+
+
+async def test_a_digest_failure_logs_the_period_and_a_class_name(session, worker_db, monkeypatch):
+    recorder = RecordingLogger()
+    monkeypatch.setattr(tasks, "log", recorder)
+    await make_user(session, email="logged@example.org", digest_frequency=DigestFrequency.DAILY.value)
+
+    async def explode(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        raise _explosion()
+
+    monkeypatch.setattr(tasks, "run_digests", explode)
+    result = await tasks.run_digest_phase(frequencies=["daily"], now=datetime(2026, 9, 7, 3, 0, tzinfo=UTC))
+
+    assert result["status"] == "failed"
+    logged = recorder.rendered()
+    assert "daily:2026-09-06" in logged, "the operator needs to know which period failed"
+    for secret in SECRETISH:
+        assert secret not in logged
+    entry = next(kw for event, kw in recorder.entries if event == "scheduled_digests_failed")
+    assert entry["outcome"] == "period_failed"
+    assert entry["error_type"] == "RuntimeError"
+
+
+async def test_a_source_failure_logs_a_class_name_and_returns_one(
+    session, worker_db, monkeypatch, demo_source
+):
+    """The ingestion worker path is sanitized too, including its stored result.
+
+    A task result is persisted in the result backend, so it deserves the same
+    treatment as a log line. The durable, user-visible run history is
+    `SourceRun.error`, written by the ingestion service itself; this change does
+    not touch it, and the recorded follow-up says so.
+    """
+    recorder = RecordingLogger()
+    monkeypatch.setattr(tasks, "log", recorder)
+
+    async def explode(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        raise _explosion()
+
+    monkeypatch.setattr(tasks, "run_source", explode)
+    results = await tasks._run_all()
+
+    assert [row["error"] for row in results] == ["RuntimeError"]
+    logged = recorder.rendered()
+    for secret in SECRETISH:
+        assert secret not in logged
+    assert any(kw.get("error_type") == "RuntimeError" for _, kw in recorder.entries)
+
+
+async def test_an_aborted_pipeline_reports_a_code_not_a_message(session, worker_db, monkeypatch):
+    recorder = RecordingLogger()
+    monkeypatch.setattr(tasks, "log", recorder)
+
+    async def explode(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        raise _explosion()
+
+    monkeypatch.setattr(tasks, "_run_all", explode)
+    report = await tasks.run_nightly_pipeline(now=datetime(2026, 9, 7, 3, 0, tzinfo=UTC))
+
+    assert report["phases"]["collect"]["error_type"] == "RuntimeError"
+    logged = recorder.rendered()
+    for secret in SECRETISH:
+        assert secret not in logged
+
+
+async def test_a_time_limit_stops_the_run_instead_of_becoming_a_phase_result(session, worker_db, monkeypatch):
+    """A soft kill is not "the monitoring phase failed"; it is "the worker stopped".
+
+    Reporting it as a phase result would let the task finish in SUCCESS state
+    after Celery had already decided to kill it, which is the kind of lie an
+    operator cannot debug from. The pipeline re-raises it too, so the run stops.
+    """
+    from app.services import alerts
+
+    async def timeout(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        raise SoftTimeLimitExceeded()
+
+    monkeypatch.setattr(alerts, "_deliver", timeout)
+    await make_user(session, email="timelimit@example.org")
+    await make_confirmed_opportunity(session, slug="sched-timelimit")
+    user = (await session.execute(sa.select(User))).scalars().one()
+    await make_rule(session, user, trigger="confirmation_met", cooldown_hours=0)
+
+    with pytest.raises(SoftTimeLimitExceeded):
+        await tasks.run_monitoring_phase(now=datetime(2026, 9, 7, 3, 0, tzinfo=UTC))
+    with pytest.raises(SoftTimeLimitExceeded):
+        await tasks.run_nightly_pipeline(now=datetime(2026, 9, 7, 3, 0, tzinfo=UTC))
+    assert (await session.execute(sa.select(AlertDelivery))).scalars().all() == []
+
+
+async def test_a_shutdown_signal_is_never_treated_as_a_unit_failure(
+    session, worker_db, monkeypatch, demo_source
+):
+    """A soft time limit means "stop the run", not "skip this source and carry on".
+
+    Swallowing it would leave the worker running past the limit the operator set,
+    and Celery's hard kill would then land mid-transaction.
+    """
+
+    async def timeout(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        raise SoftTimeLimitExceeded()
+
+    monkeypatch.setattr(tasks, "run_source", timeout)
+    with pytest.raises(SoftTimeLimitExceeded):
+        await tasks._run_all()

@@ -14,7 +14,13 @@ What is asserted here is genuinely about contention, not about mocks:
 * the lock is released by a commit *and* by a rollback, which is what makes a
   killed worker recoverable rather than a permanent lockout;
 * an in-progress scheduled run stops a second one from dispatching, and the next
-  run after it does the work.
+  run after it does the work;
+* two runs racing for the same digest period write it once — the unique index,
+  under real contention rather than in sequence;
+* an attempt that dies before its commit reserves nothing, and an outer rollback
+  discards a savepoint that was already released. Neither can be modelled on
+  SQLite, where the pysqlite driver runs SAVEPOINT outside an explicit
+  transaction; see `tests/test_digest_periods.py`.
 
 Skipped unless `TEST_POSTGRES_URL` points at a scratch database, exactly like
 `tests/test_postgres_integrity.py`. The schema is dropped and recreated, so
@@ -25,6 +31,7 @@ row.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from datetime import UTC, datetime
 
@@ -34,7 +41,8 @@ import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.db.base import Base
-from app.models.models import AlertDelivery, SystemAuditLog
+from app.models.models import AlertDelivery, Digest, SystemAuditLog
+from app.services.alerts import digest_period, run_digests
 from app.workers import tasks
 from app.workers.locks import try_advisory_xact_lock
 from tests.test_monitoring_alerts import make_rule
@@ -144,18 +152,31 @@ async def test_an_in_progress_run_stops_a_second_one_from_dispatching(pg_maker):
 
 
 async def test_the_digest_phase_is_guarded_per_period(pg_maker):
-    """Daily and weekly are separate locks: one must not block the other."""
-    async with pg_maker() as daily_holder:
-        assert await try_advisory_xact_lock(daily_holder, f"{tasks.DIGEST_LOCK}:daily") is True
+    """The lock is per period, so a retry of yesterday cannot block today.
 
-        result = await tasks.run_digest_phase(
-            frequencies=["daily", "weekly"], now=datetime(2026, 9, 6, 3, 0, tzinfo=UTC)
-        )
-        assert result["frequencies"]["daily"] == "skipped"
-        assert result["skipped"] == ["daily"]
+    Granularity matters here in both directions: two runs of the *same* period
+    must not both write it, and a run that is retrying an old period must not
+    stop the night's current one.
+    """
+    sunday = datetime(2026, 9, 6, 3, 0, tzinfo=UTC)
+    async with pg_maker() as setup:
+        await make_user(setup, email="pg-guarded@example.org", digest_frequency="daily")
+
+    async with pg_maker() as holder:
+        assert await try_advisory_xact_lock(holder, f"{tasks.DIGEST_LOCK}:daily:2026-09-05") is True
+
+        result = await tasks.run_digest_phase(frequencies=["daily", "weekly"], now=sunday)
+
+        by_key = {entry["period_key"]: entry["status"] for entry in result["periods"]}
+        assert by_key == {"daily:2026-09-05": "skipped", "weekly:2026-W35": "ok"}
+        assert result["skipped"] == ["daily:2026-09-05"]
         assert result["status"] == "partial"
+        assert result["failed_periods"] == [], "a skipped period is not a failed one"
 
-        await daily_holder.rollback()
+        # A different period of the same frequency is a different lock.
+        assert await try_advisory_xact_lock(holder, f"{tasks.DIGEST_LOCK}:daily:2026-09-04") is True
+
+        await holder.rollback()
 
 
 async def test_advisory_locks_are_really_available_here(pg_maker):
@@ -169,17 +190,149 @@ async def test_advisory_locks_are_really_available_here(pg_maker):
 
 async def test_a_scheduled_run_writes_digests_for_the_users_who_asked(pg_maker):
     """The same end-to-end path as the SQLite suite, on the real database."""
-    from app.models.models import Digest
-
     async with pg_maker() as setup:
         asked = await make_user(setup, email="pg-daily@example.org", digest_frequency="daily")
         declined = await make_user(setup, email="pg-off@example.org", digest_frequency="off")
 
     result = await tasks.run_digest_phase(frequencies=["daily"], now=datetime(2026, 9, 7, 3, 0, tzinfo=UTC))
+
     assert result["status"] == "ok"
-    assert result["frequencies"] == {"daily": 1}
+    assert result["periods"] == [
+        {
+            "frequency": "daily",
+            "period_key": "daily:2026-09-06",
+            "timezone": "UTC",
+            "status": "ok",
+            "written": 1,
+            "duplicates": 0,
+            "users_failed": 0,
+        }
+    ]
 
     async with pg_maker() as check:
         rows = (await check.execute(sa.select(Digest))).scalars().all()
-        assert [row.user_id for row in rows] == [asked.id]
+        assert [(row.user_id, row.period_key) for row in rows] == [(asked.id, "daily:2026-09-06")]
         assert declined.id not in {row.user_id for row in rows}
+
+
+async def test_two_runs_racing_for_one_period_write_one_digest(pg_maker):
+    """The unique index under real contention, not two inserts in sequence.
+
+    Both attempts run concurrently on their own connections and each commits its
+    own work, so whichever loses the race is blocked on the winner's row and then
+    sees it committed. What must happen is that the loser reports a duplicate —
+    counted, not raised — and the user ends up with one digest.
+    """
+    async with pg_maker() as setup:
+        await make_user(setup, email="pg-race@example.org", digest_frequency="daily")
+    period = digest_period("daily", now=datetime(2026, 9, 7, 3, 0, tzinfo=UTC), timezone_name="UTC")
+
+    async def attempt() -> tuple[int, int]:
+        async with pg_maker() as session:
+            outcome = await run_digests(session, frequency="daily", period=period)
+            await session.commit()
+            return outcome.written, outcome.duplicates
+
+    results = await asyncio.gather(attempt(), attempt(), attempt())
+
+    assert sorted(results) == [(0, 1), (0, 1), (1, 0)], (
+        "three concurrent runs of one period did not produce exactly one digest"
+    )
+    async with pg_maker() as check:
+        rows = (await check.execute(sa.select(Digest))).scalars().all()
+        assert len(rows) == 1
+        assert rows[0].period_key == "daily:2026-09-06"
+
+
+async def test_an_attempt_that_died_before_committing_reserved_nothing(pg_maker):
+    """The crash window, on the database that production actually runs.
+
+    An attempt that writes a digest and then dies without committing has reserved
+    nothing: the next attempt writes the period for the first time, and the user
+    is not left short a digest. The SQLite suite cannot model this — see
+    `test_sqlite_cannot_model_a_crash_after_a_released_savepoint` — so it is
+    asserted here, where a closed connection really does roll back.
+    """
+    async with pg_maker() as setup:
+        await make_user(setup, email="pg-crash@example.org", digest_frequency="daily")
+    period = digest_period("daily", now=datetime(2026, 9, 7, 3, 0, tzinfo=UTC), timezone_name="UTC")
+
+    died = pg_maker()
+    crashed = await run_digests(died, frequency="daily", period=period)
+    assert crashed.written == 1, "the attempt believed it had written one"
+    await died.close()  # the process ended here: no commit
+
+    async with pg_maker() as check:
+        assert (await check.execute(sa.select(sa.func.count()).select_from(Digest))).scalar_one() == 0
+
+    async with pg_maker() as recovered:
+        outcome = await run_digests(recovered, frequency="daily", period=period)
+        await recovered.commit()
+        rows = (await recovered.execute(sa.select(Digest))).scalars().all()
+
+    assert (outcome.written, outcome.duplicates, outcome.failed) == (1, 0, 0)
+    assert [row.period_key for row in rows] == ["daily:2026-09-06"]
+
+
+async def test_an_outer_rollback_discards_work_a_savepoint_already_released(pg_maker):
+    """The other half of the SQLite caveat, proved where it holds.
+
+    `run_digests` releases a savepoint per user and leaves the commit to its
+    caller, so a caller that rolls back — a failed phase, a killed run — must
+    find nothing persisted. On PostgreSQL that is a transaction rollback. A
+    failed period is therefore genuinely unwritten, which is what lets the retry
+    write it.
+    """
+    async with pg_maker() as setup:
+        await make_user(setup, email="pg-rollback@example.org", digest_frequency="daily")
+    period = digest_period("daily", now=datetime(2026, 9, 7, 3, 0, tzinfo=UTC), timezone_name="UTC")
+
+    async with pg_maker() as rolled_back:
+        outcome = await run_digests(rolled_back, frequency="daily", period=period)
+        assert outcome.written == 1
+        await rolled_back.rollback()
+
+    async with pg_maker() as check:
+        assert (await check.execute(sa.select(sa.func.count()).select_from(Digest))).scalar_one() == 0
+
+    async with pg_maker() as retry:
+        retried = await run_digests(retry, frequency="daily", period=period)
+        await retry.commit()
+
+    assert (retried.written, retried.duplicates) == (1, 0), (
+        "the rolled-back attempt reserved the period after all"
+    )
+
+
+async def test_a_failed_user_inside_a_period_does_not_cost_the_others_theirs(pg_maker, monkeypatch):
+    """Per-user savepoints, on the database where a failed statement aborts the transaction.
+
+    This is the case the savepoint exists for: on PostgreSQL an error inside a
+    transaction leaves the whole transaction unusable until it is rolled back, so
+    without a savepoint one user's failure would take the entire period with it.
+    The failure injected here is a real database error rather than a Python
+    exception, because that is the kind that poisons a PostgreSQL transaction.
+    """
+    from app.services import alerts
+
+    async with pg_maker() as setup:
+        await make_user(setup, email="pg-fine@example.org", digest_frequency="daily")
+        broken = await make_user(setup, email="pg-broken@example.org", digest_frequency="daily")
+    period = digest_period("daily", now=datetime(2026, 9, 7, 3, 0, tzinfo=UTC), timezone_name="UTC")
+    real_build = alerts.build_digest
+
+    async def build(session_, *, user, **kwargs):  # noqa: ANN001, ANN003
+        if user.id == broken.id:
+            await session_.execute(sa.text("SELECT 1 / :zero"), {"zero": 0})
+        return await real_build(session_, user=user, **kwargs)
+
+    monkeypatch.setattr(alerts, "build_digest", build)
+
+    async with pg_maker() as session:
+        outcome = await run_digests(session, frequency="daily", period=period)
+        await session.commit()
+        rows = (await session.execute(sa.select(Digest))).scalars().all()
+
+    assert (outcome.written, outcome.failed, outcome.duplicates) == (1, 1, 0)
+    assert [row.period_key for row in rows] == ["daily:2026-09-06"]
+    assert broken.id not in {row.user_id for row in rows}, "the user whose digest failed still got a row"
