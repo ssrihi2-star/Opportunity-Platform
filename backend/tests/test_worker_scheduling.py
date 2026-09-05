@@ -789,8 +789,21 @@ async def test_only_users_who_asked_for_a_frequency_get_one(session, worker_db):
             "written": 1,
             "duplicates": 0,
             "users_failed": 0,
+            # Generation wrote one digest; delivery found nobody to hand it to,
+            # because none of these users has a verified Telegram chat. Those are
+            # two different facts and the phase reports both.
+            "delivery": {
+                "status": "nothing_to_do",
+                "sent": 0,
+                "suppressed": 0,
+                "failed": 0,
+                "already_recorded": 0,
+                "not_eligible": 1,
+                "reason_code": None,
+            },
         }
     ]
+    assert result["delivery_failed_periods"] == []
     rows = (await session.execute(sa.select(Digest))).scalars().all()
     assert [(row.user_id, row.period_key) for row in rows] == [(asked_daily.id, "daily:2026-09-06")]
     written_to = {row.user_id for row in rows}

@@ -569,6 +569,7 @@ async def list_channels(
             verified=r.verified,
             verified_at=r.verified_at,
             link_code=None,  # never echoed back after creation
+            link_code_expires_at=r.link_code_expires_at,
         )
         for r in rows
     ]
@@ -609,6 +610,7 @@ async def start_channel_link(
         verified_at=None,
         link_code=code,
         instructions=LINK_INSTRUCTIONS.get(body.channel, "").format(code=code) or None,
+        link_code_expires_at=link.link_code_expires_at,
     )
 
 

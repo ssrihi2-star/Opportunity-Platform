@@ -34,6 +34,16 @@ are about failing honestly:
   frequency, so a retry or an overlapping run cannot write the same period
   twice. The key and the period's boundaries travel together through every
   retry.
+* **Delivery order.** Alert dispatch sends and then records, which is what leaves
+  the window described above. Digest delivery does the reverse: the
+  `alert_deliveries` row is committed *before* `provider.send()`, affordable
+  because the digest it summarises is already committed. The consequences are the
+  opposite ones — an ordinary repeat run cannot send the same period twice, but a
+  send interrupted between the record and the message leaves a `pending` row that
+  nothing resends, since resending risks a duplicate of a message that may have
+  arrived. This is best-effort delivery and **not exactly-once**: a provider can
+  hand a message to Telegram and lose the response, leaving a `failed` row for a
+  message the user did receive.
 
 An alert never says what to do. It says what changed and where to look.
 """
@@ -52,6 +62,7 @@ import sqlalchemy as sa
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.core.errors import failure_code, is_unrecoverable
 from app.core.logging import get_logger
 from app.db.base import as_utc
@@ -700,3 +711,356 @@ async def run_digests(
         failed=outcome.failed,
     )
     return outcome
+
+
+# ------------------------------------------------------- digest delivery
+#: Telegram's hard limit for one message. `TelegramProvider` renders
+#: `title\n\nbody\n\nlink`, so the budget has to cover all three.
+TELEGRAM_TEXT_LIMIT = 4096
+
+#: How many items one digest message names before it points at the app instead.
+DIGEST_MESSAGE_ITEMS = 6
+
+#: The only channel a digest is delivered on today. Email digests are not
+#: implemented, and the UI must not imply otherwise.
+DIGEST_DELIVERY_CHANNEL = "telegram"
+
+#: Only daily digests are delivered. Weekly digests are still *generated* and
+#: readable in the app; delivering them is a separate decision nobody has made.
+DIGEST_DELIVERY_FREQUENCIES = frozenset({DigestFrequency.DAILY.value})
+
+
+def digest_delivery_key(*, period_key: str, channel: str) -> str:
+    """Stable identity for one digest delivery: the period and the channel.
+
+    Stored in `alert_deliveries.dedupe_key`, whose unique `(user_id, dedupe_key)`
+    constraint is what stops an ordinary repeated run from sending the same
+    digest twice. It names the *period*, not the digest row and not the attempt,
+    so a retry, a redelivered task message and a manual re-run all collide on the
+    same key.
+    """
+    return f"digest:{period_key}:{channel}"
+
+
+@dataclass(slots=True)
+class DigestDeliveryOutcome:
+    """What one period's delivery pass did, counted per user.
+
+    * `already_recorded` — a delivery row exists for this period and channel
+      (sent, suppressed, failed, or still pending). Nothing is sent. This MVP
+      never resends an existing record, so an interrupted send is a thing an
+      operator investigates, not a thing the schedule silently retries.
+    * `not_eligible` — no row written: the user's preference is no longer daily,
+      they have no verified Telegram chat, or the frequency is not delivered.
+    """
+
+    frequency: str
+    period_key: str | None = None
+    sent: int = 0
+    suppressed: int = 0
+    failed: int = 0
+    already_recorded: int = 0
+    not_eligible: int = 0
+    reason_code: str | None = None
+
+    def as_dict(self) -> dict[str, object]:
+        if self.failed:
+            status = "failed"
+        elif self.sent or self.suppressed or self.already_recorded:
+            status = "ok"
+        else:
+            status = "nothing_to_do"
+        return {
+            "status": status,
+            "sent": self.sent,
+            "suppressed": self.suppressed,
+            "failed": self.failed,
+            "already_recorded": self.already_recorded,
+            "not_eligible": self.not_eligible,
+            "reason_code": self.reason_code,
+        }
+
+
+def _fit(text: str, budget: int) -> str:
+    """Trim to `budget` characters, keeping the cut visible."""
+    if budget <= 1 or len(text) <= budget:
+        return text[: max(0, budget)]
+    return text[: max(0, budget - 1)].rstrip() + "…"
+
+
+def render_digest_message(digest: Digest, *, link: str = "/for-you") -> NotificationMessage:
+    """One digest as one Telegram-sized message: a summary and a way in.
+
+    The stored `sections` are routinely larger than Telegram accepts, and a
+    message that quotes everything is one nobody reads. So this renders counts,
+    the first few item titles, the standing disclaimer, and a link into the app.
+
+    The budget is measured against what the provider actually sends —
+    `title`, `body` and the absolute link it builds from `APP_BASE_URL` — so the
+    result is guaranteed to fit rather than hoped to.
+    """
+    sections = digest.sections or {}
+    period = sections.get("period") or {}
+    key = str(digest.period_key or period.get("key") or "")
+    label = key.split(":", 1)[1] if ":" in key else digest.period_start.date().isoformat()
+    title = f"Your {digest.frequency} digest — {label}"
+
+    watched = list(sections.get("watchlist_changes") or [])
+    others = list(sections.get("other_changes") or [])
+    alerts_section = list(sections.get("alerts") or [])
+
+    lines: list[str] = []
+    if digest.item_count == 0:
+        lines.append(str(sections.get("empty_note") or "Nothing on your watchlists changed in this period."))
+    else:
+        parts = [f"{digest.item_count} item{'s' if digest.item_count == 1 else 's'}"]
+        if watched:
+            parts.append(f"{len(watched)} on your watchlists")
+        if others:
+            parts.append(f"{len(others)} elsewhere")
+        if alerts_section:
+            parts.append(f"{len(alerts_section)} alert{'s' if len(alerts_section) == 1 else ''}")
+        lines.append(" · ".join(parts) + ".")
+        for item in (watched + others)[:DIGEST_MESSAGE_ITEMS]:
+            kind = str(item.get("kind") or "").replace("_", " ")
+            lines.append(f"• {_fit(str(item.get('title') or 'Untitled'), 80)} — {kind}")
+        remaining = len(watched) + len(others) - DIGEST_MESSAGE_ITEMS
+        if remaining > 0:
+            lines.append(f"… and {remaining} more in the app.")
+
+    note = str(sections.get("note") or "")
+    if note:
+        lines.append(note)
+
+    base = get_settings().APP_BASE_URL.rstrip("/")
+    link_text = f"{base}{link}" if link else base
+    # title + "\n\n" + body + "\n\n" + link_text, which is what the provider sends.
+    overhead = len(title) + len(link_text) + 4
+    body = _fit("\n".join(lines), max(0, TELEGRAM_TEXT_LIMIT - overhead))
+    return NotificationMessage(
+        title=_fit(title, 300),  # alert_deliveries.title is VARCHAR(300)
+        body=body,
+        link=link,
+        detail={"digest_id": str(digest.id), "period_key": digest.period_key},
+    )
+
+
+async def deliver_digests(
+    session: AsyncSession,
+    *,
+    frequency: str,
+    period: DigestPeriod | None = None,
+    now: datetime | None = None,
+) -> DigestDeliveryOutcome:
+    """Send the stored digests for one period to verified Telegram chats.
+
+    Called **after** the period's digests are committed, so delivery is a
+    separate step over rows that already exist — which is also what lets a digest
+    generated by an earlier run (and skipped as a duplicate this time) still be
+    delivered, as long as no delivery record exists for it.
+
+    Two properties are deliberate and worth stating exactly:
+
+    * **The delivery record is committed before the send.** A repeated run
+      therefore finds the row and does not send again. That is the opposite order
+      from `_deliver`, and it is affordable here because a digest send is not
+      part of the transaction that produced the digest.
+    * **An existing record is never resent** — not `pending`, not `failed`. So a
+      worker interrupted between the commit and the send leaves a `pending` row
+      and a user with no message. That is a real gap, it is visible in
+      `GET /me/alerts` and in the phase report, and closing it needs a sweeper
+      that this MVP does not have. What is *not* true is that a resend can
+      happen by accident: the unique key makes the ordinary repeat a no-op.
+
+    One digest, one message, per period: the delivery key carries the period and
+    the channel but not the chat, so a user who verified two Telegram chats gets
+    the digest on the older binding and the second is counted `already_recorded`.
+
+    Delivery is best-effort and **not exactly-once**: the send can fail after the
+    record exists (no message, no automatic retry), and a provider that hands the
+    message to Telegram and then loses the response leaves a `failed` row for a
+    message the user did receive.
+
+    Each user is isolated. A send that raises costs that user their message and
+    nobody else theirs; a broken transaction or a supervisor stop signal is
+    re-raised, exactly as in `dispatch` and `run_digests`.
+    """
+    now = now or datetime.now(UTC)
+    outcome = DigestDeliveryOutcome(frequency=frequency, period_key=period.key if period else None)
+
+    if period is None:
+        # On-demand digests (`POST /me/digests`) stay a read-in-the-app feature.
+        outcome.reason_code = "no_period"
+        return outcome
+    if frequency not in DIGEST_DELIVERY_FREQUENCIES:
+        outcome.reason_code = "frequency_not_delivered"
+        return outcome
+
+    channel = DIGEST_DELIVERY_CHANNEL
+    key = digest_delivery_key(period_key=period.key, channel=channel)
+    rows = (
+        await session.execute(
+            sa.select(Digest, User, NotificationChannelLink)
+            .join(User, User.id == Digest.user_id)
+            .join(UserProfile, UserProfile.user_id == User.id)
+            .join(
+                NotificationChannelLink,
+                sa.and_(
+                    NotificationChannelLink.user_id == User.id,
+                    NotificationChannelLink.channel == channel,
+                    NotificationChannelLink.verified.is_(True),
+                ),
+            )
+            .where(
+                Digest.frequency == frequency,
+                Digest.period_key == period.key,
+                # The preference is read at delivery time, not at generation time:
+                # a user who switched off between the two gets nothing.
+                UserProfile.digest_frequency == frequency,
+                User.is_active.is_(True),
+            )
+            # Deterministic when a user verified more than one chat: the oldest
+            # binding wins, and the others are counted `already_recorded` below
+            # rather than sent a second copy of the same digest.
+            .order_by(Digest.created_at, NotificationChannelLink.verified_at)
+        )
+    ).all()
+
+    users_with_digest = set(
+        (
+            await session.execute(
+                sa.select(Digest.user_id).where(
+                    Digest.frequency == frequency, Digest.period_key == period.key
+                )
+            )
+        ).scalars()
+    )
+    for digest, user, link in rows:
+        address = link.external_id
+        message = render_digest_message(digest)
+        delivery_id: uuid.UUID | None = None
+        try:
+            async with session.begin_nested():
+                existing = (
+                    await session.execute(
+                        sa.select(AlertDelivery.id).where(
+                            AlertDelivery.user_id == user.id, AlertDelivery.dedupe_key == key
+                        )
+                    )
+                ).scalar_one_or_none()
+                if existing is not None:
+                    outcome.already_recorded += 1
+                    continue
+                delivery = AlertDelivery(
+                    user_id=user.id,
+                    # A digest delivery references no rule, opportunity or event,
+                    # and invents none: all three columns are nullable, and the
+                    # period identity lives in `dedupe_key`.
+                    rule_id=None,
+                    opportunity_id=None,
+                    event_id=None,
+                    channel=channel,
+                    title=message.title,
+                    body=message.body,
+                    dedupe_key=key,
+                    status=DeliveryStatus.PENDING,
+                )
+                session.add(delivery)
+                await session.flush()
+                delivery_id = delivery.id
+            # Durable before anything leaves the machine.
+            await session.commit()
+        except IntegrityError:
+            outcome.already_recorded += 1
+            continue
+        except Exception as exc:  # noqa: BLE001 - one user must not stop the rest
+            if is_unrecoverable(exc):
+                raise
+            await session.rollback()
+            outcome.failed += 1
+            logger.warning(
+                "digest.delivery_record_failed",
+                outcome="delivery_skipped",
+                frequency=frequency,
+                error_type=failure_code(exc),
+            )
+            continue
+
+        try:
+            provider = get_provider(channel)
+            if provider is None or not provider.configured:
+                reason = f"No {channel} provider is configured, so the digest was not sent."
+                await _mark_delivery(session, delivery_id, DeliveryStatus.SUPPRESSED, reason, None)
+                outcome.suppressed += 1
+                continue
+            result = await provider.send(address=address, message=message)
+        except Exception as exc:  # noqa: BLE001 - a failed send is recorded, not raised
+            if is_unrecoverable(exc):
+                raise
+            await _mark_delivery(
+                session,
+                delivery_id,
+                DeliveryStatus.FAILED,
+                f"Telegram delivery raised ({failure_code(exc)}).",
+                None,
+            )
+            outcome.failed += 1
+            logger.warning(
+                "digest.delivery_failed",
+                outcome="delivery_failed",
+                frequency=frequency,
+                error_type=failure_code(exc),
+            )
+            continue
+
+        if result.delivered:
+            await _mark_delivery(session, delivery_id, DeliveryStatus.SENT, None, now)
+            outcome.sent += 1
+        else:
+            await _mark_delivery(
+                session, delivery_id, DeliveryStatus.SUPPRESSED, _fit(result.detail, 200), None
+            )
+            outcome.suppressed += 1
+
+    # Users who asked for a daily digest and got one, but cannot be reached on
+    # Telegram: counted, never silently dropped, and never sent an unverified chat.
+    reachable = {user.id for _, user, _ in rows}
+    outcome.not_eligible = max(0, len(users_with_digest - reachable))
+
+    logger.info(
+        "digests.delivered",
+        frequency=frequency,
+        period_key=outcome.period_key,
+        sent=outcome.sent,
+        suppressed=outcome.suppressed,
+        failed=outcome.failed,
+        already_recorded=outcome.already_recorded,
+        not_eligible=outcome.not_eligible,
+        reason_code=outcome.reason_code,
+    )
+    return outcome
+
+
+async def _mark_delivery(
+    session: AsyncSession,
+    delivery_id: uuid.UUID | None,
+    status: DeliveryStatus,
+    reason: str | None,
+    sent_at: datetime | None,
+) -> None:
+    """Settle a committed delivery row.
+
+    Reloaded by primary key rather than reused from before the commit: the row
+    was committed in between, and a session factory configured with
+    `expire_on_commit=True` would make every attribute read on the old instance
+    an implicit lazy load — which raises inside async code.
+    """
+    if delivery_id is None:
+        return
+    row = await session.get(AlertDelivery, delivery_id)
+    if row is None:
+        return
+    row.status = status
+    row.suppressed_reason = _fit(reason, 200) if reason else None
+    row.sent_at = sent_at
+    await session.commit()

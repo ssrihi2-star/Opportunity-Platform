@@ -155,9 +155,16 @@ To stop receiving updates entirely: `deleteWebhook`.
 3. Telegram calls the webhook. The code is consumed and the chat is bound.
 4. `GET /api/v1/me/channels` now shows `verified: true`.
 
-> **The user sees nothing in the chat.** The bot does not send a message back.
-> Step 4 — `GET /api/v1/me/channels` showing `verified: true` — is the only
-> confirmation a user gets, so any UI built on this should poll it and say so.
+> **The user sees nothing in the chat during linking.** The bot does not send a
+> message back. Step 4 — `GET /api/v1/me/channels` showing `verified: true` — is
+> the only confirmation a user gets, so any UI built on this should poll it and
+> say so. `/settings` does: the notifications panel requests a code, shows these
+> instructions, polls that one link every few seconds, and stops when it turns
+> verified, when the user unlinks, or when they leave the page.
+>
+> Verification is what makes the chat *writable later*. A daily digest is
+> delivered to a verified chat by the schedule — a different code path, documented
+> in `docs/scheduling.md` — and an unverified link is never written to by anything.
 
 The webhook classifies each `/link` attempt into one of four outcomes. These
 strings are returned in the webhook's **HTTP response body**, as
@@ -207,6 +214,13 @@ confirming whether a guessed code was ever real.
 lists the caller's own links with their current `verified` and `verified_at`,
 and keeps working before, during and after redemption. `link_code` is never
 echoed back by the listing.
+
+The listing does carry `link_code_expires_at` — the deadline the webhook itself
+enforces, taken from the same row it checks. It is `null` once a link is verified,
+because redemption clears the code and its expiry together, and `null` for a link
+that never had one. That is what lets a UI show a real deadline instead of
+inventing a countdown: `/settings` renders the expiry when it is there and offers
+a fresh code when it is not.
 
 ### `POST /me/channels/verify` is legacy, and reports on *pending* links only
 
@@ -339,10 +353,13 @@ DELETE FROM notification_channel_links
   plus the `ux_channel_external` unique constraint — which is a reasoned
   argument, not a measured result. Verifying it would mean adding a Telegram
   concurrency test that runs on a real PostgreSQL database.
-- **The bot never writes to the chat.** Outcome strings are HTTP responses to
+- **Linking never writes to the chat.** Outcome strings are HTTP responses to
   Telegram, which discards them (see §4). Users confirm success in the app, via
-  `GET /me/channels`. Replying in-chat would need an outbound `sendMessage`
-  call, which was out of scope here.
+  `GET /me/channels` or the `/settings` panel that polls it. Replying in-chat as
+  part of linking would need an outbound `sendMessage` call, which was out of
+  scope here. The bot *does* send to a verified chat on another path: the daily
+  digest delivery in `docs/scheduling.md`. Nothing in that path confirms a link,
+  and nothing here sends a digest.
 
 ---
 

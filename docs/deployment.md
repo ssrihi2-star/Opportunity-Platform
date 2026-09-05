@@ -60,6 +60,18 @@ it states the cadence, the ordering guarantee between collection, monitoring and
 digests, what the concurrency guard does when two runs overlap, and exactly
 which delivery guarantees the send-before-commit design can and cannot make.
 
+**Enabling the schedule also enables outbound messages.** A daily digest is
+delivered to every **verified** Telegram chat whose owner still wants a daily
+digest, once per period, after that period's digests commit. So the schedule plus
+a configured `TELEGRAM_BOT_TOKEN` plus a registered webhook (`docs/telegram-linking.md`)
+means users start receiving one message a night. `APP_BASE_URL` builds the link
+inside that message and defaults to `http://localhost:3000`, which is not a URL a
+user can open — set it before enabling the schedule. Weekly digests are generated
+and readable in the app but are not delivered, and there is no email digest.
+Delivery is best-effort: an interrupted send leaves a `pending`
+`alert_deliveries` row that nothing resends, and `docs/scheduling.md` says how to
+find and handle those.
+
 ## Production notes
 
 * Terminate TLS at a reverse proxy (Caddy or nginx); set `COOKIE_SECURE=true`.

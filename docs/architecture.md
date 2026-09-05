@@ -206,13 +206,20 @@ request, over an already-decided result.
   different identities.
 * `digests` is unique on `(user_id, frequency, period_key)`, where `period_key`
   names a canonical period (`daily:2026-09-06`, `weekly:2026-W36`) rather than
-  the instant the task ran. Digests are stored rows with no external send, so
-  they are the one phase that retries: bounded, and only over the periods that
-  rolled back, with each retry carrying the original period key and boundaries so
-  a retry after midnight still writes the period it was scheduled for. On-demand
-  digests keep a NULL key and stay repeatable. A digest is a row the user reads in
-  the application; **no channel delivers it**. `docs/scheduling.md` states the
-  whole guarantee, including the crash window it cannot close.
+  the instant the task ran. Generation is the one phase that retries: bounded, and
+  only over the periods that rolled back, with each retry carrying the original
+  period key and boundaries so a retry after midnight still writes the period it
+  was scheduled for. On-demand digests keep a NULL key and stay repeatable.
+* A daily digest is **also delivered** to a verified Telegram chat after its
+  period commits, and its `alert_deliveries` row is committed *before* the send —
+  the inverse of alert dispatch, affordable because the digest already exists. A
+  retry therefore finds the record and does not resend. Delivery failures are
+  reported, never retried by the generation retry, and never rewrite a committed
+  digest. **Weekly digests are generated and readable in the app but not
+  delivered**; the UI labels them as in-app only. Existing `pending` or `failed`
+  records are not resent automatically — an interrupted send needs a person.
+  `docs/scheduling.md` states the whole guarantee, including the crash window it
+  cannot close.
 * Partial source failure is normal: an adapter returns what it managed to fetch and
   raises `PartialFetchError` carrying those records; the run is marked `partial`.
 

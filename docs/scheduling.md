@@ -21,12 +21,13 @@ Before this, two things were true:
 A deployment that collected data every night and told nobody about it is the
 failure mode this document exists to prevent.
 
-**What is still missing, stated up front:** a digest is a **row in the
-database** that the user reads inside the application. Nothing in this system
-sends a digest to Telegram or to email. Daily Telegram digest delivery is **not
-implemented** and is a separate piece of work (see "Follow-ups"). Enabling the
-schedule gives users a nightly/weekly summary they can open in the product; it
-does not push it to them.
+**What the schedule pushes, stated up front:** a digest is written as a **row in
+the database**, and a *daily* digest is then delivered to a **verified Telegram
+chat** for users whose preference is still `daily` — see "Delivering a digest"
+below. Weekly digests are generated and readable in the app but **not delivered
+anywhere**, and there is no email digest. So enabling the schedule gives every
+subscriber a summary they can open in the product, and gives a daily Telegram
+user one message a night; it does not push anything else.
 
 ## What is scheduled, and when
 
@@ -240,8 +241,9 @@ Consequences, all of them deliberate:
 
 ### The retry: what it carries, and how often it happens
 
-The digest phase is the only phase that retries, because a digest is a stored
-row and not an external send. The retry is deliberately narrow:
+Digest generation is the only part of the schedule that retries, because
+*writing* a digest is a stored row and not an external send. The retry is
+deliberately narrow:
 
 * **It carries the original period identity.** `run_digest_phase` reports the
   periods that failed as `{frequency, key, start, end, timezone}`, and every
@@ -264,6 +266,13 @@ row and not an external send. The retry is deliberately narrow:
   re-attempts the whole period, because the worker running it may be a different
   process with no idea who succeeded. Users already written come back as counted
   duplicates through `ux_digest_period`.
+* **A retry runs delivery again, and does not send twice.** The retried task
+  carries the period through to `alerts.deliver_digests` as well. Anyone whose
+  message went out — or was recorded as suppressed or failed — already has a
+  committed `alert_deliveries` row, so the retry finds it and counts
+  `already_recorded`. Only users with no record for that period are sent
+  anything, which includes a user whose digest an earlier run wrote and nobody
+  delivered.
 * **Publishing the retry can fail, and that is reported.** Neither `apply_async`
   nor Celery's own `self.retry` removes broker-publish failure: if the broker is
   down, the retry is dropped. When that happens the run's result carries
@@ -419,6 +428,96 @@ into the request path.
   `tests/test_worker_concurrency_postgres.py`, and the SQLite limitation is
   pinned in `tests/test_digest_periods.py` rather than papered over.
 
+## Delivering a digest
+
+Generation writes the row; delivery takes it to the person.
+`alerts.deliver_digests(session, *, frequency, period, now)` runs once per
+period, after `run_digests_for_period` has committed and released its savepoint,
+and only for frequencies in `DIGEST_DELIVERY_FREQUENCIES` — today `{"daily"}`.
+Weekly and on-demand digests are generated and read inside the app; they are
+never sent, and the call says so through `reason_code` (`frequency_not_delivered`,
+`no_period`) rather than returning zeros that look like success.
+
+### Who is told
+
+One query, no per-user lookups:
+
+| Condition | Why it is there |
+|---|---|
+| a `digests` row for this user, frequency and `period_key` | Selection is by **stored row**, not by what this run wrote — so a digest an earlier run generated, or one whose generation this run skipped as a duplicate, is still delivered when no delivery record exists |
+| `users.is_active` and `digest_frequency` still equal to this frequency | The preference is read at **delivery** time: somebody who switched to weekly yesterday is not sent a daily digest today |
+| a `notification_channel_links` row with `verified = true` on `telegram` | The whole point of the binding flow. An unverified link is never written to, and its owner is counted `not_eligible` rather than silently skipped |
+
+The key is `digest:<period_key>:telegram` — period and channel, **not** the chat —
+so one subscriber gets one message per period. Somebody who verified two Telegram
+chats is told on the older binding (the query orders by `verified_at`) and the
+second row comes back as `already_recorded`, not as a duplicate.
+
+`not_eligible` counts users who wanted this frequency but could not be reached.
+It is not a failure, and it is not zero by accident: a period where nothing was
+sent and everybody was `not_eligible` is a deployment with no verified chats,
+which is worth seeing.
+
+### The record is committed before the message is sent
+
+Alert dispatch sends first and records after, and says so. Digest delivery does
+the opposite, and can afford to because the digest already exists:
+
+1. insert an `alert_deliveries` row with `status = pending` and
+   `dedupe_key = digest:<period_key>:telegram`, and **commit**;
+2. call `provider.send()`;
+3. update that row to `sent` (with `sent_at`), or to `failed` / `suppressed` with
+   a sanitized `suppressed_reason`.
+
+Therefore:
+
+* **An ordinary repeat run does not send twice.** Step 1 is what makes that true:
+  a `SELECT ... FOR UPDATE` on an existing `(user_id, dedupe_key)` row means the
+  second run sees the record and counts `already_recorded`. The unique constraint
+  is the backstop if two runs ever overlap.
+* **An interrupted send is not repeated.** A worker killed between steps 1 and 3
+  leaves a `pending` row and nothing resends it. That is deliberate — the message
+  may have reached Telegram, and an automatic retry would risk telling the user
+  twice. It is a real gap, it is counted, and limitation 2 says what an operator
+  has to do about it.
+* **This is best-effort, not exactly-once.** A provider can hand the message to
+  Telegram and then lose the response; the row says `failed` about a message the
+  user did receive. Nothing available here can tell those apart, because Telegram
+  gives no delivery receipt.
+
+A database failure around one user rolls back to their savepoint, is logged as
+`digest.delivery_record_failed` and does not stop the next user. A provider that
+raises is contained per user, logged as `digest.delivery_failed` with an
+`error_type`, and recorded as `failed` with the stored reason
+`"Telegram delivery raised (RuntimeError)."` — a class name, never the message.
+Only a
+stop signal (`SoftTimeLimitExceeded`, `WorkerShutdown`, `CancelledError`,
+`SystemExit`, `KeyboardInterrupt`) is re-raised, because containing one would keep
+a worker alive that was told to die.
+
+### What the message says
+
+`render_digest_message(digest)` builds the text: a title naming the period, up to
+`DIGEST_MESSAGE_ITEMS = 6` entries per section with their summaries, the number of
+alerts in the period, and the standing "not a recommendation" disclaimer. Sections
+are trimmed to fit, and the result is measured the way the provider actually
+renders it — title, body, then `{APP_BASE_URL}{link}` — against
+`TELEGRAM_TEXT_LIMIT = 4096`, with the link inside the budget and never dropped. A
+day with nothing in it says so explicitly, because silence reads like an outage.
+The link is `/for-you`, the page that lists the user's own digest history.
+
+### What is stored
+
+`alert_deliveries` needed no new column. `rule_id`, `opportunity_id` and
+`event_id` are all nullable, so a digest delivery references none of them and
+invents none: `title` and `body` hold the text the user received, `dedupe_key`
+holds the period identity, `channel` is `telegram`, and `suppressed_reason` holds
+either the provider's own detail or a class-name classification — never exception
+text, a chat id or a bot token. The rows are visible through the
+existing `GET /api/v1/me/alerts`.
+
+No new provider, table, queue, setting or migration was added for this.
+
 ## Logging and stored failure text
 
 Failure logging uses **fixed outcome codes plus an exception class name**, and
@@ -448,6 +547,10 @@ The events, all of them carrying `outcome=` and, on failure, `error_type=`:
 | `scheduled_digests_written` / `scheduled_digests_failed` | one period | `period_failed` |
 | `digests.generated` / `digest.user_failed` | one user's digest | `user_skipped` |
 | `scheduled_digests_retrying` | bounded retry | `retry_scheduled` (period keys + attempt + countdown) |
+| `digests.delivered` | one period's digest delivery | — (counts plus `reason_code`) |
+| `digest.delivery_failed` | one user's send raised | `delivery_failed` |
+| `digest.delivery_record_failed` | one user's delivery record | `delivery_skipped` |
+| `scheduled_digests_delivered` / `scheduled_digest_delivery_failed` | one period's delivery | `delivery_failed` |
 | `digest_retry_queued` / `digest_retry_publish_failed` | delegation | `retry_not_queued` |
 | `source_failed` / `task_run_source_failed` | ingestion worker | `source_skipped` |
 | `notification.telegram_failed` / `notification.email_failed` | providers | `delivery_failed` |
@@ -505,8 +608,18 @@ Celery's supported behaviour, which is what the `worker` service uses:
    Notification credentials are separate and unchanged: `TELEGRAM_BOT_TOKEN`,
    `SMTP_HOST`/`SMTP_FROM`. A blank one means that channel is off, deliveries on
    it are recorded as suppressed with the reason, and the in-app row is still
-   written. Enabling the schedule does not enable a provider, and no provider is
-   involved in digests at all.
+   written. Enabling the schedule does not enable a provider — but **a daily
+   digest is now delivered on Telegram**, so a blank `TELEGRAM_BOT_TOKEN` means
+   every daily digest is generated, recorded as `suppressed` and read only in the
+   app. Weekly digests involve no provider at all. `APP_BASE_URL` decides the
+   link inside the digest message, so it has to be a URL the user can open
+   (`http://localhost:3000` by default, which is not one).
+
+   Delivery also needs the webhook registered, because only a **verified** chat is
+   ever written to: `docs/telegram-linking.md` has the `setWebhook` procedure and
+   `TELEGRAM_WEBHOOK_SECRET`. A user who never verified sees the digest in
+   `/for-you` and nothing in Telegram, and the phase reports them as
+   `not_eligible`.
 
 2. Run the migration and the processes. Both services already exist in
    `docker-compose.yml`; nothing new is added:
@@ -545,7 +658,18 @@ Celery's supported behaviour, which is what the `worker` service uses:
    SELECT frequency, period_key, count(*), max(generated_at)
      FROM digests GROUP BY frequency, period_key ORDER BY 4 DESC;
    SELECT channel, status, count(*) FROM alert_deliveries GROUP BY channel, status;
+
+   -- digest deliveries for one period, and any that never completed
+   SELECT status, suppressed_reason, count(*) FROM alert_deliveries
+    WHERE dedupe_key LIKE 'digest:daily:2026-09-06:%' GROUP BY status, suppressed_reason;
+   SELECT user_id, dedupe_key, created_at FROM alert_deliveries
+    WHERE dedupe_key LIKE 'digest:%' AND status = 'pending';
    ```
+
+   A `pending` digest delivery is the one thing here that needs a decision rather
+   than a re-run: the record was committed and the send did not complete, and
+   nothing resends it (limitation 2). `sent` rows for a period nobody expected
+   messages for usually mean `not_eligible` was read as a failure — it is not one.
 
    The audit row's `after` carries `opportunities`, `checks`, `events`,
    `events_considered`, `alerts_sent`, `alerts_suppressed` and `alerts_failed` —
@@ -581,6 +705,7 @@ Celery's supported behaviour, which is what the `worker` service uses:
 |---|---|---|
 | `tests/test_worker_scheduling.py` | schedule contents and defaults, timezone and day-name validation, phase ordering, deduplication across repeated runs, digest eligibility, unverified/unconfigured channels, per-user delivery-failure isolation, bounded retry wiring and backoff, retry delegation from the pipeline, broker-publish failure being reported, sanitized worker logs, that importing starts no scheduler | SQLite, providers faked or left unconfigured, clock passed explicitly, broker never contacted (Celery eager mode for the retry paths) |
 | `tests/test_digest_periods.py` | period math (daily/weekly boundaries, local wall clock, 23- and 25-hour days, a 167-hour week), the key surviving the broker, repeated and legacy-key idempotency, retry identity after midnight and after a timezone change, a partial period finished without repeating its users, on-demand digests staying repeatable, migration `0007` against a genuinely pre-0007 table | SQLite; migration driven through the revision module's own `upgrade()`/`downgrade()` |
+| `tests/test_digest_delivery.py` | a daily digest reaching a verified chat and the record it leaves, the 4096-character budget measured the way the provider renders it, unverified chats never written to, a preference changed after generation, weekly and on-demand digests not delivered, an unconfigured provider recording a suppression, repeated runs and repeated periods, a `pending` row never resent, the record surviving a send that raises, one user's failure not stopping the next, sanitized logs and stored reasons, a stop signal not contained, phase wiring including a digest written by an earlier run, and the channels API exposing a real expiry but never the code | SQLite; Telegram replaced by a fake channel, or left genuinely unconfigured for the suppression path; clock passed explicitly; sockets blocked by `conftest.py` |
 | `tests/test_alert_isolation.py` | relevance/rule/digest isolation, that a relevance failure skips a user rather than guessing, that a savepoint holds database work but not a message already sent (and the duplicate that follows), stop signals never being contained, `failure_code`/`is_unrecoverable` semantics, and sanitized logs *and* persisted provider details | SQLite, providers replaced by fakes for one test, sockets blocked by `conftest.py` |
 | `tests/test_worker_concurrency_postgres.py` | the advisory lock really refuses a second transaction, really dies with a rollback, and really stops an overlapping run from dispatching; three runs racing for one period write one digest; an attempt that died before committing reserved nothing; an outer rollback discards a released savepoint; a real database error for one user does not cost the others | PostgreSQL, `poolclass=None` so each session is its own connection, gated on `TEST_POSTGRES_URL` |
 
@@ -590,49 +715,70 @@ Telegram or SMTP.
 
 ## Limitations
 
-1. **Digests are not delivered anywhere.** They are rows the user reads in the
-   application. Daily Telegram digest delivery is **not implemented**; nothing in
-   this schedule sends a digest by any channel.
-2. **The crash window is real and is not closed.** Send-before-commit means a
-   killed worker can cause one duplicate external delivery for the batch in
-   flight, and a rule that fails after sending leaves no record of a message that
-   went out. Closing it requires committing the `pending` delivery row before
-   `provider.send()` and updating its status afterwards, plus a sweep of rows
-   left `pending` — a change inside `app/services/alerts.py::_deliver`.
-3. **Loss is possible.** `acks_late=False` plus a kill loses the run; the
+1. **Only daily digests reach a channel, and only Telegram.** A daily digest is
+   delivered to a **verified** Telegram chat whose owner still wants it at send
+   time; **weekly digests are generated and readable in the app but not delivered
+   anywhere**, and there is no email digest. A user with no verified link, or a
+   deployment with no bot token, gets the row and nothing else — recorded as
+   `not_eligible` or `suppressed`, never as sent.
+2. **An interrupted digest delivery is not repeated.** The delivery record is
+   committed *before* the send, so a `pending` row means "committed, send did not
+   complete", and nothing resends it: an automatic retry would risk a duplicate
+   for a message that may well have arrived. `already_recorded` in the phase
+   report counts these rows; a person has to look at one and decide. Delivery is
+   best-effort and **not exactly-once** — a provider can hand the message to
+   Telegram and then lose the response, leaving a `failed` row for a message the
+   user did receive.
+3. **The crash window is real and is not closed.** For *alert dispatch*,
+   send-before-commit means a killed worker can cause one duplicate external
+   delivery for the batch in flight, and a rule that fails after sending leaves no
+   record of a message that went out. Closing it requires committing the `pending`
+   delivery row before `provider.send()` and updating its status afterwards, plus a
+   sweep of rows left `pending` — a change inside `app/services/alerts.py::_deliver`.
+   Digest delivery already records before sending, so it trades that duplicate for
+   the unrepeated `pending` row in limitation 2.
+4. **Loss is possible.** `acks_late=False` plus a kill loses the run; the
    lookback window is a second chance bounded by `MONITOR_LOOKBACK_HOURS`, not a
    queue. An event older than the window is never re-presented.
-4. **Equivalent regenerated events may have different identities**, so the
+5. **Equivalent regenerated events may have different identities**, so the
    dedupe constraint does not always recognise a repeated fact; cooldown is the
    only limiter, and a `cooldown_hours = 0` rule can alert on equivalent facts on
    consecutive nights.
-5. **A dropped retry is not made up later.** If the broker refuses the delegated
+6. **A dropped retry is not made up later.** If the broker refuses the delegated
    digest retry, that period stays unwritten until an operator runs it by hand
    (command above). The failure is reported in the run's result and logged, not
    swallowed.
-6. **Suppressed and failed external deliveries are never retried.** There is no
+7. **Suppressed and failed external deliveries are never retried.** There is no
    delivery queue to retry from; a suppression row is terminal. Users still see
    the alert in-app.
-7. **Collection has no cross-process lock** (it commits per source), so two
+8. **Collection has no cross-process lock** (it commits per source), so two
    overlapping collections duplicate HTTP requests but not data.
-8. **`MONITOR_EVENT_LIMIT` bounds a run.** If more events than the limit occur
+9. **`MONITOR_EVENT_LIMIT` bounds a run.** If more events than the limit occur
    inside the lookback window, the oldest are not considered by that run and are
    picked up by the next one only while they remain inside the window. Raise the
    limit rather than widening the lookback if a deployment is event-heavy.
-9. **Savepoint isolation is weaker on SQLite** than on PostgreSQL, as described
-   above. Development on SQLite can therefore show a phase reporting failure
-   while some of its rows survived; production PostgreSQL does not.
+10. **Savepoint isolation is weaker on SQLite** than on PostgreSQL, as described
+    above. Development on SQLite can therefore show a phase reporting failure
+    while some of its rows survived; production PostgreSQL does not.
 
 ## Follow-ups (deliberately not done here)
 
 Each of these was considered and left out, because doing it would have changed
 behaviour this task was not authorised to change:
 
-* **Deliver digests** to a channel (Telegram/email), with per-channel
-  verification and its own dedupe identity.
+* **Deliver weekly digests, and digests by email.** Daily Telegram delivery is
+  implemented; weekly is generated and read in the app only, and email digests do
+  not exist. Both would reuse `deliver_digests` by widening
+  `DIGEST_DELIVERY_FREQUENCIES` and adding a channel, not by changing its shape.
+* **Sweep `pending` digest deliveries** (limitation 2). The record is committed
+  before the send, so an interrupted send is visible and unrepeated; deciding
+  what to do with one — resend, or mark it abandoned — needs a policy this MVP
+  deliberately did not choose.
 * **Stable event / dedupe identity** so a re-derived equivalent event is
-  recognised as the same fact (limitation 4).
-* **Commit-before-send** for deliveries, plus a `pending` sweep (limitation 2).
+  recognised as the same fact (limitation 5).
+* **Commit-before-send for alert dispatch**, plus the same `pending` sweep
+  (limitation 3). Digest delivery already records first; alert dispatch still
+  sends first.
 * **An outbox table** for external sends, which is what would make delivery
   genuinely at-least-once and is a much larger change than a scheduler.
 * **Review cooldown semantics** for rules with `cooldown_hours = 0`.

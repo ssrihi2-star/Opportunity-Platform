@@ -22,9 +22,15 @@ guarantee — a run killed after sending and before committing loses the record 
 what it sent, and the next run re-derives an equivalent event under a new id, so
 nothing deduplicates the repeat.
 
-Digests are the exception that proves the rule: they are stored rows with no
-external send, so they can be retried, bounded at `1 + DIGEST_MAX_RETRIES`
+Digest *generation* is the exception that proves the rule: it writes stored rows
+with no external effect, so it can be retried, bounded at `1 + DIGEST_MAX_RETRIES`
 attempts per period, and made idempotent by `(user_id, frequency, period_key)`.
+Digest *delivery* — a daily digest sent to a verified Telegram chat, after the
+period commits — is a separate step with its own durable record and its own
+dedupe key (`digest:<period key>:telegram`). It is not exactly-once and it is
+never resent automatically: an existing delivery row, including a `pending` or
+`failed` one, is left alone and reported, so an interrupted send is something an
+operator investigates rather than something the schedule quietly repeats.
 
 Every task here is a thin wrapper around an `async` phase function, so the
 phases can be exercised directly in tests without a broker, a worker or a
@@ -43,6 +49,7 @@ from datetime import UTC, datetime, timedelta
 
 import sqlalchemy as sa
 from celery.exceptions import SoftTimeLimitExceeded
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.core.errors import failure_code, is_unrecoverable
@@ -50,7 +57,7 @@ from app.core.logging import get_logger
 from app.db.session import SessionLocal
 from app.models.enums import DigestFrequency
 from app.models.models import Source, SystemAuditLog
-from app.services.alerts import DigestPeriod, digest_period, dispatch, run_digests
+from app.services.alerts import DigestPeriod, deliver_digests, digest_period, dispatch, run_digests
 from app.services.ingestion import reap_stale_runs, run_source
 from app.services.monitoring import monitor_all, recent_events
 from app.workers.celery_app import celery_app
@@ -334,14 +341,20 @@ async def run_digest_phase(
     `(user_id, frequency, period_key)` makes any overlap a counted duplicate
     rather than a second row.
 
-    Nothing here sends mail or messages: a digest is a stored row the user reads
-    in the product. That is why this phase can be retried and the alert phase
-    above cannot.
+    Generation and delivery are two steps. Generation writes the rows and is
+    what the retry mechanism covers; delivery runs only after a period has
+    committed, sends daily digests to verified Telegram chats through the
+    existing provider, and records each send in `alert_deliveries` under a key
+    naming the period and the channel. A delivery failure is reported and counted
+    but never puts the period back in `failed_periods`: regenerating a digest
+    would not resend it, because the delivery record — not the digest row — is
+    what stops a repeat.
     """
     now = now or datetime.now(UTC)
     resolved = _resolve_periods(periods=periods, frequencies=frequencies, now=now)
     results: list[dict] = []
     failed_periods: list[dict] = []
+    delivery_failed: list[str] = []
     skipped: list[str] = []
 
     for period in resolved:
@@ -404,6 +417,13 @@ async def run_digest_phase(
                 users_failed=outcome.failed,
             )
 
+            # Delivery, now that the period's digests are durable. A digest
+            # written by an earlier run and skipped as a duplicate this time is
+            # still delivered here, provided no delivery record exists for it.
+            entry["delivery"] = await _deliver_period_digests(session, period=period, now=now)
+            if entry["delivery"].get("status") == "failed":
+                delivery_failed.append(period.key)
+
     written_periods = [entry for entry in results if entry["status"] in {"ok", "partial"}]
     if failed_periods and not written_periods:
         status = "failed"
@@ -416,8 +436,52 @@ async def run_digest_phase(
         "status": status,
         "periods": results,
         "failed_periods": failed_periods,
+        "delivery_failed_periods": delivery_failed,
         "skipped": skipped,
     }
+
+
+async def _deliver_period_digests(session: AsyncSession, *, period: DigestPeriod, now: datetime) -> dict:
+    """Send one committed period's daily digests, and report what happened.
+
+    Deliberately separate from generation, and deliberately not fatal to it: the
+    digests are already committed, so a delivery problem is a reported outcome,
+    not a reason to roll back or regenerate anything. Weekly digests are
+    generated and readable in the app but are not delivered — `deliver_digests`
+    says so with a reason code rather than sending nothing silently.
+    """
+    try:
+        outcome = await deliver_digests(session, frequency=period.frequency, period=period, now=now)
+        await session.commit()
+    except Exception as exc:  # noqa: BLE001 - one period's delivery must not lose the run
+        if is_unrecoverable(exc):
+            raise
+        await session.rollback()
+        log.error(
+            "scheduled_digest_delivery_failed",
+            outcome="delivery_failed",
+            frequency=period.frequency,
+            period_key=period.key,
+            error_type=failure_code(exc),
+        )
+        return {
+            "status": "failed",
+            "reason_code": "delivery_failed",
+            "error_type": failure_code(exc),
+        }
+    report = outcome.as_dict()
+    log.info(
+        "scheduled_digests_delivered",
+        frequency=period.frequency,
+        period_key=period.key,
+        sent=report["sent"],
+        suppressed=report["suppressed"],
+        failed=report["failed"],
+        already_recorded=report["already_recorded"],
+        not_eligible=report["not_eligible"],
+        reason_code=report["reason_code"],
+    )
+    return report
 
 
 def _delegate_digest_retry(failed_periods: Sequence[Mapping[str, str]]) -> dict:
@@ -575,7 +639,7 @@ async def run_nightly_pipeline(*, now: datetime | None = None) -> dict:
     phases["digests"] = digests
     if digests["failed_periods"]:
         digests["retry"] = _delegate_digest_retry(digests["failed_periods"])
-    if digests["status"] != "ok" or failed_sources:
+    if digests["status"] != "ok" or digests["delivery_failed_periods"] or failed_sources:
         report["status"] = "degraded"
     log.info(
         "pipeline_finished",
@@ -584,6 +648,8 @@ async def run_nightly_pipeline(*, now: datetime | None = None) -> dict:
         alerts_suppressed=monitoring.get("alerts_suppressed"),
         alerts_failed=monitoring.get("alerts_failed"),
         digest_periods=[entry.get("period_key") for entry in digests["periods"]],
+        digests_delivered=sum(int(e.get("delivery", {}).get("sent") or 0) for e in digests["periods"]),
+        digest_delivery_failed=len(digests["delivery_failed_periods"]),
     )
     return report
 

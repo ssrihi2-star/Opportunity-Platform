@@ -229,6 +229,11 @@ class ChannelLinkOut(BaseModel):
     #: Only ever present immediately after creation, for the user to paste.
     link_code: str | None = None
     instructions: str | None = None
+    #: When the outstanding code stops working, straight from the row the webhook
+    #: checks. NULL once a link is verified (the code and its expiry are cleared
+    #: together), so a client can show a real deadline or show nothing — it never
+    #: has to invent one. The code itself is still never echoed back.
+    link_code_expires_at: datetime | None = None
 
 
 class ChannelLinkIn(BaseModel):
