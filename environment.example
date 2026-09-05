@@ -64,5 +64,35 @@ GEMINI_API_KEY=
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_CHAT_ID=
 
+# --------------------------------------------------------------- scheduling
+# Periodic alert dispatch and digest generation, OFF by default. With this
+# false, Celery beat schedules nightly collection and the stale-run janitor
+# exactly as before, and alerts are dispatched only when an administrator runs
+# POST /api/v1/monitoring/run. Nothing in the API or the test suite starts a
+# scheduler; beat is its own process (`docker compose up -d beat`).
+# Turning it on REPLACES the bare collection entry with one ordered run —
+# collect -> check conditions and dispatch alerts -> write digests — so a
+# dependent phase never runs on top of a prerequisite that failed, and
+# collection is never scheduled twice. See docs/scheduling.md.
+SCHEDULER_ENABLED=false
+# IANA timezone the crontabs fire in. Stored timestamps stay UTC either way.
+SCHEDULE_TIMEZONE=UTC
+# Local hour and minute of the nightly run.
+COLLECT_HOUR=3
+COLLECT_MINUTE=0
+# Stale-run janitor cadence, in minutes.
+REAP_EVERY_MINUTES=15
+# How far back a scheduled monitoring run looks for change events. Keep it at
+# least as wide as the gap between two runs, so a run that failed or was killed
+# is picked up by the next one; events already delivered are suppressed by the
+# unique constraint on (user_id, dedupe_key), not sent again.
+MONITOR_LOOKBACK_HOURS=26
+# How many of the most recent events inside that window one run considers.
+MONITOR_EVENT_LIMIT=500
+# Day name (monday..sunday) in SCHEDULE_TIMEZONE on which the nightly run also
+# writes weekly digests. A name, not a number: cron counts days from Sunday and
+# Python counts them from Monday.
+DIGEST_WEEKLY_DAY=sunday
+
 # -------------------------------------------------------------------- frontend
 NEXT_PUBLIC_API_URL=http://localhost:8000/api/v1

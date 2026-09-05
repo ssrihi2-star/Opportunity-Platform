@@ -192,7 +192,17 @@ request, over an already-decided result.
   run asks "has this changed?" instead of re-downloading.
 * `source_runs` records status, counts, HTTP request count and error. A crashed run
   is left `running` and reaped by a janitor task after `SOURCE_RUN_STALE_MINUTES`.
-* Every Celery task uses `acks_late=True` with bounded retries and backoff.
+* Ingestion tasks use `acks_late=True` with bounded retries and backoff, because
+  they are idempotent: a redelivered run stores nothing new.
+* The notification tasks (`ois.run_monitoring`, `ois.run_digests`, and the ordered
+  `ois.run_nightly_pipeline` that contains them) are the opposite, deliberately:
+  `acks_late=False` and no whole-batch retry, because `alerts.dispatch` sends to
+  Telegram/SMTP *before* the transaction recording the send commits. Redelivering
+  a batch that had already sent part of itself would send that part again. They
+  recover through the next scheduled run and the unique `(user_id, dedupe_key)`
+  constraint instead. Digests — stored rows, no external send — do retry, with a
+  bounded backoff and only over the periods that rolled back. `docs/scheduling.md`
+  states the whole guarantee, including the crash window it cannot close.
 * Partial source failure is normal: an adapter returns what it managed to fetch and
   raises `PartialFetchError` carrying those records; the run is marked `partial`.
 

@@ -96,6 +96,45 @@ class Settings(BaseSettings):
     SMTP_STARTTLS: bool = True
     APP_BASE_URL: str = "http://localhost:3000"
 
+    # --- scheduling (Celery beat; see docs/scheduling.md) ------------------
+    #: Master switch for the *notification* schedule. Nothing in the API or the
+    #: test suite starts a scheduler: beat is its own process, and this setting
+    #: only decides which periodic entries that process is handed.
+    #:
+    #: False (the default) leaves the schedule exactly as it has always been —
+    #: nightly collection plus the stale-run janitor — and no alert dispatch or
+    #: digest generation happens unless an administrator presses the button.
+    #:
+    #: True replaces the bare collection entry with one ordered run:
+    #: collect -> check conditions and dispatch alerts -> write digests. It
+    #: replaces rather than adds, so collection is never scheduled twice, and
+    #: ordering is enforced by the task rather than by hoping two cron times stay
+    #: far enough apart.
+    SCHEDULER_ENABLED: bool = False
+    #: IANA timezone name for every crontab, and for deciding which local day a
+    #: weekly digest belongs to. Stored timestamps stay UTC (`enable_utc` is
+    #: never turned off); this only says which wall clock fires the job.
+    SCHEDULE_TIMEZONE: str = "UTC"
+    #: Local hour and minute of the nightly run — collection on its own when
+    #: scheduling is off, the whole ordered run when it is on.
+    COLLECT_HOUR: int = 3
+    COLLECT_MINUTE: int = 0
+    #: The janitor cadence, previously hardcoded at every 15 minutes.
+    REAP_EVERY_MINUTES: int = 15
+    #: How far back a scheduled monitoring run looks for change events. It must
+    #: be at least the gap between two runs, so a run that failed, was killed or
+    #: was skipped is picked up by the next one. Re-presenting an event that was
+    #: already delivered costs nothing: `(user_id, dedupe_key)` is unique, so the
+    #: repeat is suppressed by the database rather than by the code's memory.
+    MONITOR_LOOKBACK_HOURS: int = 26
+    #: How many of the most recent events in that window one run considers.
+    MONITOR_EVENT_LIMIT: int = 500
+    #: Day name in `SCHEDULE_TIMEZONE` — monday..sunday — on which the nightly
+    #: run also writes weekly digests. Weekly digests are part of that ordered
+    #: run rather than a separate cron entry, so they too are written only after
+    #: the monitoring they summarise has committed.
+    DIGEST_WEEKLY_DAY: str = "sunday"
+
     @property
     def cors_origins(self) -> list[str]:
         return [o.strip() for o in self.CORS_ORIGINS.split(",") if o.strip()]
