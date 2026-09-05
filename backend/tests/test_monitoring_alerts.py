@@ -18,6 +18,7 @@ import pytest
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.models.enums import ConditionCheckState
 from app.models.models import (
     AlertDelivery,
@@ -47,6 +48,20 @@ from app.services.monitoring import (
 from tests.test_multi_user import make_opportunity
 
 pytestmark = pytest.mark.asyncio
+
+
+@pytest.fixture
+def telegram_secret(monkeypatch) -> str:
+    """Configure a webhook secret for the two chat-binding tests below.
+
+    ``get_settings`` is lru_cached, so the cache is cleared on entry and exit to
+    keep this configuration from leaking into the rest of the suite.
+    """
+    secret = "monitoring-suite-webhook-secret"
+    monkeypatch.setenv("TELEGRAM_WEBHOOK_SECRET", secret)
+    get_settings.cache_clear()
+    yield secret
+    get_settings.cache_clear()
 
 
 async def add_observations(
@@ -510,13 +525,22 @@ async def test_an_unverified_channel_link_is_never_written_to(session, admin_use
     assert {r.channel for r in rows} == {"in_app"}, "the unverified chat got nothing"
 
 
-async def test_linking_a_chat_requires_the_one_time_code(client, admin_headers):
+async def test_linking_a_chat_requires_the_one_time_code(client, admin_headers, telegram_secret):
+    """A code alone proves nothing; only the bot delivering it can bind a chat.
+
+    Rewritten for the secure flow. This test used to hand ``external_id`` to
+    ``/me/channels/verify``, which is exactly the bypass that was removed: the
+    caller minted the code, so presenting it back demonstrated no control of
+    any Telegram chat. Binding now happens only through the authenticated
+    webhook. Full coverage lives in ``tests/test_telegram_binding.py``.
+    """
     started = await client.post("/api/v1/me/channels", json={"channel": "telegram"}, headers=admin_headers)
     assert started.status_code == 201
     code = started.json()["link_code"]
     assert code and started.json()["verified"] is False
     assert "Until you do, nothing is sent" in started.json()["instructions"]
 
+    # An unknown code is still a 404 from the status endpoint.
     wrong = await client.post(
         "/api/v1/me/channels/verify",
         json={"channel": "telegram", "link_code": "not-the-code", "external_id": "chat-1"},
@@ -524,40 +548,69 @@ async def test_linking_a_chat_requires_the_one_time_code(client, admin_headers):
     )
     assert wrong.status_code == 404
 
-    right = await client.post(
+    # The user's own code, replayed with a chat id they do not control, no
+    # longer verifies anything: the endpoint only reports status now.
+    replay = await client.post(
         "/api/v1/me/channels/verify",
         json={"channel": "telegram", "link_code": code, "external_id": "chat-1"},
         headers=admin_headers,
     )
-    assert right.status_code == 200
-    assert right.json()["verified"] is True
-    # The code is never echoed back once used.
-    assert right.json()["link_code"] is None
+    assert replay.status_code == 200
+    assert replay.json()["verified"] is False, "self-service verification is gone"
+
+    # The bot reporting a private message carrying that code does bind it.
+    delivered = await client.post(
+        "/api/v1/integrations/telegram/webhook",
+        json={
+            "update_id": 1,
+            "message": {"chat": {"id": 1234, "type": "private"}, "text": f"/link {code}"},
+        },
+        headers={"X-Telegram-Bot-Api-Secret-Token": telegram_secret},
+    )
+    assert delivered.status_code == 200
+    assert delivered.json()["handled"] is True
+
     listed = (await client.get("/api/v1/me/channels", headers=admin_headers)).json()
-    assert listed[0]["link_code"] is None
+    assert listed[0]["verified"] is True
+    assert listed[0]["link_code"] is None, "the code is never echoed back once used"
 
 
-async def test_one_chat_cannot_be_claimed_by_two_accounts(client, admin_headers, second_headers):
+async def test_one_chat_cannot_be_claimed_by_two_accounts(
+    client, admin_headers, second_headers, telegram_secret
+):
     """Otherwise a stranger could attach your chat and read your opportunities."""
+    webhook = "/api/v1/integrations/telegram/webhook"
+    auth = {"X-Telegram-Bot-Api-Secret-Token": telegram_secret}
+
     first_code = (
         await client.post("/api/v1/me/channels", json={"channel": "telegram"}, headers=admin_headers)
     ).json()["link_code"]
     await client.post(
-        "/api/v1/me/channels/verify",
-        json={"channel": "telegram", "link_code": first_code, "external_id": "chat-42"},
-        headers=admin_headers,
+        webhook,
+        json={
+            "update_id": 1,
+            "message": {"chat": {"id": 42, "type": "private"}, "text": f"/link {first_code}"},
+        },
+        headers=auth,
     )
 
     second_code = (
         await client.post("/api/v1/me/channels", json={"channel": "telegram"}, headers=second_headers)
     ).json()["link_code"]
     stolen = await client.post(
-        "/api/v1/me/channels/verify",
-        json={"channel": "telegram", "link_code": second_code, "external_id": "chat-42"},
-        headers=second_headers,
+        webhook,
+        json={
+            "update_id": 2,
+            "message": {"chat": {"id": 42, "type": "private"}, "text": f"/link {second_code}"},
+        },
+        headers=auth,
     )
-    assert stolen.status_code == 409
-    assert "One chat, one account" in stolen.json()["detail"]
+    assert stolen.status_code == 200
+    assert "already linked" in stolen.json()["reply"].lower()
+
+    # The chat still belongs to the first account, and the second is unverified.
+    theirs = (await client.get("/api/v1/me/channels", headers=second_headers)).json()
+    assert theirs[0]["verified"] is False, "one chat, one account"
 
 
 async def test_alerts_are_private(client, admin_headers, second_headers):

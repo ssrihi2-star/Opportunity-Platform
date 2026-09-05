@@ -14,7 +14,6 @@ or a rule by id refuse to return one that belongs to somebody else, answering
 
 from __future__ import annotations
 
-import secrets
 import uuid
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
@@ -24,6 +23,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import current_user, db_session
+from app.api.v1 import telegram
 from app.models.enums import DigestFrequency
 from app.models.models import (
     AlertDelivery,
@@ -545,7 +545,9 @@ async def generate_digest(
 LINK_INSTRUCTIONS = {
     "telegram": (
         "Open the bot in Telegram and send: /link {code}. Until you do, nothing is "
-        "sent to that chat, and the chat cannot read anything about your account."
+        "sent to that chat, and the chat cannot read anything about your account. "
+        "The code expires shortly and works once. Send it in a direct message with "
+        "the bot, not in a group."
     ),
 }
 
@@ -583,13 +585,18 @@ async def start_channel_link(
     The code — not the chat id — is what proves the chat belongs to this account.
     Without it, anyone who knew or guessed a chat id could attach it to their own
     account and start receiving another person's alerts.
+
+    Issuing the code is only half the exchange. It is redeemed by sending it
+    *into the chat*, where Telegram observes which chat it came from and tells
+    the webhook. Nothing this endpoint returns can complete a link on its own.
     """
-    code = secrets.token_urlsafe(12)
+    code = telegram.new_link_code()
     link = NotificationChannelLink(
         user_id=user.id,
         channel=body.channel,
-        external_id=f"pending:{code}",
+        external_id=telegram.pending_placeholder(code),
         link_code=code,
+        link_code_expires_at=telegram.code_expiry(),
         verified=False,
     )
     session.add(link)
@@ -611,45 +618,53 @@ async def verify_channel_link(
     session: AsyncSession = Depends(db_session),
     user: User = Depends(current_user),
 ) -> ChannelLinkOut:
-    """Complete the link by presenting the code together with the external id."""
+    """Report the status of a pending link. It can no longer *grant* one.
+
+    This endpoint used to take a `link_code` the caller had just been issued
+    together with an `external_id` the caller simply asserted, and set
+    ``verified = True`` from the pair. Both halves came from the same
+    authenticated request, so the exchange proved only that the user could type:
+    anyone could bind any chat id, including someone else's, and start receiving
+    that chat's alerts.
+
+    Verification now happens in the only place that can actually witness the
+    chat — the webhook, from an update Telegram itself delivered. The route is
+    kept so existing clients get a truthful answer rather than a 404, but the
+    `external_id` they send is ignored on purpose: nothing a caller asserts
+    about which chat they own may influence the binding.
+
+    Poll here, or `GET /me/channels`, to watch `verified` flip once the user has
+    sent `/link <code>` to the bot.
+    """
     link = (
         await session.execute(
             sa.select(NotificationChannelLink).where(
                 NotificationChannelLink.user_id == user.id,
                 NotificationChannelLink.channel == body.channel,
-                NotificationChannelLink.link_code == body.link_code,
+                sa.or_(
+                    NotificationChannelLink.link_code == body.link_code,
+                    # Already redeemed through the webhook: the code is cleared,
+                    # so match the placeholder the pending row was created with.
+                    NotificationChannelLink.external_id
+                    == telegram.pending_placeholder(body.link_code),
+                ),
             )
         )
     ).scalar_one_or_none()
     if link is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No pending link with that code.")
 
-    taken = (
-        await session.execute(
-            sa.select(NotificationChannelLink).where(
-                NotificationChannelLink.channel == body.channel,
-                NotificationChannelLink.external_id == body.external_id,
-                NotificationChannelLink.id != link.id,
-            )
-        )
-    ).scalar_one_or_none()
-    if taken is not None:
-        raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            "That chat is already linked to an account. One chat, one account.",
-        )
-
-    link.external_id = body.external_id
-    link.verified = True
-    link.verified_at = datetime.now(UTC)
-    link.link_code = None
-    await session.commit()
     return ChannelLinkOut(
         id=link.id,
         channel=link.channel,
-        verified=True,
+        verified=link.verified,
         verified_at=link.verified_at,
         link_code=None,
+        instructions=(
+            None
+            if link.verified
+            else LINK_INSTRUCTIONS.get(link.channel, "").format(code=body.link_code) or None
+        ),
     )
 
 

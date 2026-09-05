@@ -11,6 +11,7 @@ from app.api.v1 import (
     preferences,
     signals,
     sources,
+    telegram,
     trends,
 )
 
@@ -24,5 +25,6 @@ api_router.include_router(opportunities.router)
 api_router.include_router(me.router)
 api_router.include_router(countries.router)
 api_router.include_router(monitoring.router)
+api_router.include_router(telegram.router)
 api_router.include_router(overview.router)
 api_router.include_router(health.router)
