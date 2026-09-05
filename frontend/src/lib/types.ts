@@ -523,3 +523,61 @@ export type WatchlistItemIn = {
   keyword?: string | null;
   label?: string | null;
 };
+
+// --------------------------------------------------------------- notifications
+export type DigestFrequency = "off" | "daily" | "weekly";
+
+/**
+ * The profile fields this UI reads and writes.
+ *
+ * `PUT /me/profile` applies only the fields present in the body, so the
+ * notifications panel sends `digest_frequency` alone and leaves the rest of the
+ * profile — countries, capital, risk tolerance, skills — exactly as it was.
+ */
+export type Profile = {
+  digest_frequency: DigestFrequency;
+  [key: string]: unknown;
+};
+
+export type ChannelLink = {
+  id: string;
+  channel: string;
+  verified: boolean;
+  verified_at: string | null;
+  /** Present only in the response that created the link. Never echoed back. */
+  link_code?: string | null;
+  instructions?: string | null;
+  /**
+   * The deadline the webhook itself enforces, straight from the row. NULL once
+   * the link is verified, so the UI shows a real expiry or none at all.
+   */
+  link_code_expires_at?: string | null;
+};
+
+export type DigestItem = {
+  opportunity_id: string;
+  title: string;
+  kind: string;
+  summary: string | null;
+};
+
+export type DigestAlert = { title: string; body: string; at: string };
+
+export type DigestSections = {
+  period?: { start?: string; end?: string; frequency?: string; key?: string; timezone?: string };
+  alerts?: DigestAlert[];
+  watchlist_changes?: DigestItem[];
+  other_changes?: DigestItem[];
+  note?: string;
+  empty_note?: string;
+};
+
+export type Digest = {
+  id: string;
+  frequency: string;
+  period_start: string;
+  period_end: string;
+  item_count: number;
+  sections: DigestSections;
+  generated_at: string;
+};

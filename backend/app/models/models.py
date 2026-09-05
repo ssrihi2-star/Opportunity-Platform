@@ -1236,6 +1236,25 @@ class Digest(UUIDMixin, CreatedAtMixin, Base):
     sections: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
     item_count: Mapped[int] = mapped_column(sa.Integer, default=0)
     generated_at: Mapped[datetime] = mapped_column(sa.DateTime(timezone=True), index=True)
+    #: Stable identity for the period this row summarises — `daily:2026-09-06`
+    #: or `weekly:2026-W36` — derived from the schedule's timezone, not from the
+    #: instant the task happened to run. It is what makes a retried, redelivered
+    #: or overlapping run write the period once instead of once per attempt, and
+    #: it is carried through every retry so a retry after midnight still writes
+    #: the period it was scheduled for.
+    #:
+    #: NULL on rows written before the column existed and on on-demand digests
+    #: (`POST /me/digests`), which stay repeatable exactly as they were: both
+    #: PostgreSQL and SQLite treat NULLs as distinct in a unique index, so
+    #: history is preserved and no backfill is needed.
+    period_key: Mapped[str | None] = mapped_column(sa.String(40))
+
+    __table_args__ = (
+        # A unique index rather than a table constraint: it is identical in
+        # effect on PostgreSQL and it is the only form SQLite can add to an
+        # existing table, so one migration works on both.
+        sa.Index("ux_digest_period", "user_id", "frequency", "period_key", unique=True),
+    )
 
 
 class NotificationChannelLink(UUIDMixin, TimestampMixin, Base):
