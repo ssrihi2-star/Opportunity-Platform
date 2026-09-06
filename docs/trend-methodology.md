@@ -329,3 +329,48 @@ happen to share ordinary English words. Distinguishing them needs entity
 resolution on identifiers, which section 1 already describes and which is
 deliberately **not** attempted here. The behaviour is pinned by characterisation
 tests in `tests/test_topics.py` so any future change to it is a visible diff.
+
+### Which surfaces choose their mode, and which are pinned
+
+The two modes are not offered everywhere, because not every surface has a reader
+who can choose.
+
+**Trends and Opportunities are explicit.** They carry the mode selector, they
+default to demo-inclusive, and every figure on them is labelled with the mode it
+came from. Demo evidence remains fully reachable there; nothing was hidden.
+
+**The personal feed, scheduled alerts and scheduled digests are pinned to
+`live_only`.** These arrive unbidden — often as a Telegram message read on a
+phone — with no dropdown beside them saying what the number was computed from. A
+demo-backed candidate is least defensible exactly there, so it never enters. The
+value lives in one place, `services/surfaces.DEFAULT_SURFACE_MODE`, because the
+realistic failure is one surface quietly keeping the old default after the others
+move.
+
+This is deliberately **not** a per-user preference. A preference would let the
+same underlying fact alert somebody once per mode: the alert dedupe key is built
+from the event, not from the mode, so the same change would legitimately reach a
+person twice. One mode for the push surfaces makes that impossible.
+
+**Filtering is applied on read as well as on write.** `monitor_all` no longer
+creates change events for demo candidates, but events and deliveries recorded
+before this rule existed are still stored, and they stay stored — deleting
+history to implement a display rule would destroy the record of what the system
+actually said. Digests are assembled from history, so both halves of that
+assembly (the change events and the previously recorded deliveries) filter by
+the mode of the opportunity each row points at. An `AlertDelivery` has no mode of
+its own; a delivery with no opportunity at all, such as a rule-level or system
+notice, is kept, because it is not a demo result.
+
+**An empty live-only result is presented as empty.** No fallback, no top-up. If
+the live sources support nothing today, the feed says so and the digest says so.
+Substituting demo rows to make the page look populated would convert an honest
+silence into a false claim, which is the precise failure this whole distinction
+exists to prevent.
+
+The label reflects the same honesty. "Live only" is a statement about what was
+*excluded*, not a quality guarantee, so the UI describes it as *"Excludes demo
+and manual-import sources; freshness and accuracy are not verified."* Candidates
+built this way remain `validation_status = unvalidated`: the evidence being live
+says nothing about whether the adapters have been proven, and both statements are
+true at once.

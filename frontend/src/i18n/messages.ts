@@ -161,8 +161,11 @@ export const messages = {
       liveOnly: "Live only",
       demoInclusiveHint:
         "Everything stored: live sources, offline generators, demo scenarios and the seeded CSV import.",
+      // Deliberately states the limit as well as the guarantee. "Live only" reads
+      // like a quality claim; it is not one. It says what was left out, not that
+      // what remains is fresh or correct.
       liveOnlyHint:
-        "Only evidence collected from live sources. Demo, generator and manually imported series are excluded before anything is scored.",
+        "Excludes demo and manual-import sources; freshness and accuracy are not verified.",
       liveBadge: "LIVE ONLY",
       demoBadge: "DEMO-INCLUSIVE",
       liveSourceTag: "live",
@@ -399,9 +402,14 @@ export const messages = {
       includeOutside: "Include what sits outside my profile",
       includeOutsideHint:
         "Turning this off hides items outside your filters. They are flagged, never silently dropped.",
+      // The empty state names the mode. An empty live-only feed is a real
+      // finding about the evidence, not a broken page, and the reader can only
+      // tell the difference if the page says which evidence it looked at.
       empty:
-        "No opportunities to rank for you yet. Once candidates exist, they are ordered by how well they fit your profile.",
+        "No live-evidence opportunities to rank for you yet. This feed reads live sources only; demo and manual-import candidates are never shown here, and nothing is substituted when the live set is empty.",
       noProfileHint: "Relevance comes from your profile. Fill it in to make this ordering meaningful.",
+      liveScope:
+        "Live evidence only. Demo and manual-import candidates are excluded from this feed and from your alerts. To see them, choose Demo-inclusive on Trends or Opportunities.",
     },
     watchlists: {
       title: "Watchlists",
@@ -682,8 +690,11 @@ export const messages = {
       liveOnly: "Live only",
       demoInclusiveHint:
         "Everything stored: live sources, offline generators, demo scenarios and the seeded CSV import.",
+      // Deliberately states the limit as well as the guarantee. "Live only" reads
+      // like a quality claim; it is not one. It says what was left out, not that
+      // what remains is fresh or correct.
       liveOnlyHint:
-        "Only evidence collected from live sources. Demo, generator and manually imported series are excluded before anything is scored.",
+        "Excludes demo and manual-import sources; freshness and accuracy are not verified.",
       liveBadge: "LIVE ONLY",
       demoBadge: "DEMO-INCLUSIVE",
       liveSourceTag: "live",
@@ -911,8 +922,14 @@ export const messages = {
       minRelevance: "حد أدنى للملاءمة",
       includeOutside: "أظهر ما يقع خارج ملفي",
       includeOutsideHint: "إيقافه يخفي العناصر خارج تفضيلاتك. تظهر مُعلَّمة ولا تُحذف بصمت أبداً.",
-      empty: "لا توجد فرص لترتيبها لك بعد. عند وجود مرشحات، ستُرتَّب حسب مدى ملاءمتها لملفك.",
+      // English, per the same English-first decision recorded on the `analysis`
+      // block above: these two strings are live-only copy, and a wrong Arabic
+      // description of what the feed excludes would be worse than an English one.
+      empty:
+        "No live-evidence opportunities to rank for you yet. This feed reads live sources only; demo and manual-import candidates are never shown here, and nothing is substituted when the live set is empty.",
       noProfileHint: "الملاءمة تأتي من ملفك. أكمل ملفك ليصبح هذا الترتيب أكثر معنى.",
+      liveScope:
+        "Live evidence only. Demo and manual-import candidates are excluded from this feed and from your alerts. To see them, choose Demo-inclusive on Trends or Opportunities.",
     },
     watchlists: {
       title: "قوائم المتابعة",

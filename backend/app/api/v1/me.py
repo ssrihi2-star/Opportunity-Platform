@@ -61,6 +61,7 @@ from app.schemas.personal import (
 )
 from app.services.alerts import build_digest
 from app.services.profiles import build_context, convert, ensure_profile
+from app.services.surfaces import live_only
 from app.services.user_relevance import compute_for_user
 
 router = APIRouter(tags=["me"])
@@ -146,10 +147,15 @@ async def update_profile(
     # Relevance is stale the moment the profile changes, so it is rebuilt now
     # rather than left to disagree with what the user just told us.
     context = await build_context(session, profile)
+    # Scoped to the surface mode: relevance is only ever read back by the feed,
+    # so scoring demo-inclusive rows here would be work whose only possible use
+    # is to leak them somewhere.
     opportunities = list(
         (
             await session.execute(
-                sa.select(Opportunity).order_by(Opportunity.opportunity_score.desc()).limit(DISCOVERY_CAP)
+                live_only(sa.select(Opportunity))
+                .order_by(Opportunity.opportunity_score.desc())
+                .limit(DISCOVERY_CAP)
             )
         ).scalars()
     )
@@ -173,7 +179,10 @@ async def _feed(
     profile = await ensure_profile(session, user)
     context = await build_context(session, profile)
 
-    stmt = sa.select(Opportunity).order_by(Opportunity.opportunity_score.desc())
+    # The personal feed shows live-only candidates. It arrives unbidden and has
+    # no evidence selector beside it, so it must not carry demo-backed rows; the
+    # explicit demo-inclusive view stays on Trends and Opportunities.
+    stmt = live_only(sa.select(Opportunity)).order_by(Opportunity.opportunity_score.desc())
     if min_global_score is not None:
         stmt = stmt.where(Opportunity.opportunity_score >= min_global_score)
     candidates = list((await session.execute(stmt.limit(DISCOVERY_CAP))).scalars())

@@ -82,6 +82,7 @@ from app.models.models import (
 from app.notifications import NotificationMessage, get_provider
 from app.notifications import providers as _providers  # noqa: F401 - registers the defaults
 from app.services.profiles import build_context
+from app.services.surfaces import DEFAULT_SURFACE_MODE, surface_opportunity_filter
 from app.services.user_relevance import compute_for_user
 
 logger = get_logger(__name__)
@@ -284,6 +285,14 @@ async def dispatch(
     """Match every event against every enabled rule, once per user per fact."""
     now = now or datetime.now(UTC)
     total = AlertOutcome()
+
+    # Last gate before anything is delivered. `recent_events` already filters by
+    # mode, but `dispatch` is also reachable from the admin monitoring endpoint
+    # and from tests, and a delivery is the one action here that cannot be taken
+    # back once it has left for Telegram. Re-checking a cheap in-memory attribute
+    # is worth more than trusting every present and future caller.
+    events = [(event, opp) for event, opp in events if opp.analysis_mode == DEFAULT_SURFACE_MODE]
+
     if not events:
         return total
 
@@ -568,11 +577,26 @@ async def build_digest(
         delivery_filters.append(AlertDelivery.created_at < end)
         event_filters.append(OpportunityChangeEvent.occurred_at < end)
 
+    # Both halves are filtered by mode, not just the new one. A digest is built
+    # from *history*, so filtering only newly-written events would let alerts
+    # recorded against demo candidates before this change reappear inside a
+    # freshly generated summary. The rows stay in the database untouched; they
+    # are simply not eligible material for a digest.
+    #
+    # An alert with no opportunity (rule-level or system notices) is kept: it is
+    # not a demo result, and dropping it would silently lose real notices.
     deliveries = list(
         (
             await session.execute(
                 sa.select(AlertDelivery)
-                .where(*delivery_filters)
+                .outerjoin(Opportunity, Opportunity.id == AlertDelivery.opportunity_id)
+                .where(
+                    *delivery_filters,
+                    sa.or_(
+                        AlertDelivery.opportunity_id.is_(None),
+                        surface_opportunity_filter(),
+                    ),
+                )
                 .order_by(AlertDelivery.created_at.desc())
                 .limit(100)
             )
@@ -584,7 +608,7 @@ async def build_digest(
             await session.execute(
                 sa.select(OpportunityChangeEvent, Opportunity)
                 .join(Opportunity, Opportunity.id == OpportunityChangeEvent.opportunity_id)
-                .where(*event_filters)
+                .where(*event_filters, surface_opportunity_filter())
                 .order_by(OpportunityChangeEvent.occurred_at.desc())
                 .limit(50)
             )

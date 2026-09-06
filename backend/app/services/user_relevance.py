@@ -31,6 +31,7 @@ from app.models.models import (
     OpportunityParticipation,
     UserOpportunityRelevance,
 )
+from app.services.surfaces import live_only
 
 logger = get_logger(__name__)
 
@@ -157,11 +158,19 @@ async def compute_for_user(
 async def refresh_user(
     session: AsyncSession, *, user_id: uuid.UUID, user: UserContext, limit: int = 500
 ) -> int:
-    """Recompute a user's whole relevance set, e.g. after they edit their profile."""
+    """Recompute a user's whole relevance set, e.g. after they edit their profile.
+
+    Scoped to the surface mode. Stored relevance is consumed by the personal feed
+    and by alert matching, both of which are live-only, so relevance against a
+    demo-inclusive candidate has no reader — computing it would only create a row
+    that a future query could mistake for something worth showing.
+    """
     opportunities = list(
         (
             await session.execute(
-                sa.select(Opportunity).order_by(Opportunity.opportunity_score.desc()).limit(limit)
+                live_only(sa.select(Opportunity))
+                .order_by(Opportunity.opportunity_score.desc())
+                .limit(limit)
             )
         ).scalars()
     )

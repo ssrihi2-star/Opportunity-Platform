@@ -37,6 +37,7 @@ from app.models.models import (
     Trend,
     TrendSignal,
 )
+from app.services.surfaces import live_only
 
 logger = get_logger(__name__)
 
@@ -411,12 +412,24 @@ async def detect_changes(
 async def monitor_all(
     session: AsyncSession, *, limit: int = 500, now: datetime | None = None
 ) -> dict[str, int]:
-    """Check conditions and detect changes across every stored opportunity."""
+    """Check conditions and detect changes across every monitored opportunity.
+
+    Scoped to the push-surface mode (`live_only`). Scheduled alerts are the one
+    place a result reaches somebody without an evidence selector beside it, so a
+    demo-backed candidate must not be able to generate one. Filtering here rather
+    than at dispatch means no demo change event is *written* in the first place,
+    which is what stops one surfacing later in a digest built from history.
+
+    Demo-inclusive candidates keep their existing stored events and remain fully
+    visible on Trends and Opportunities; they simply stop producing new ones.
+    """
     now = now or datetime.now(UTC)
     opportunities = list(
         (
             await session.execute(
-                sa.select(Opportunity).order_by(Opportunity.opportunity_score.desc()).limit(limit)
+                live_only(sa.select(Opportunity))
+                .order_by(Opportunity.opportunity_score.desc())
+                .limit(limit)
             )
         ).scalars()
     )
@@ -440,10 +453,21 @@ async def monitor_all(
 async def recent_events(
     session: AsyncSession, *, since: datetime, limit: int = 200
 ) -> list[tuple[OpportunityChangeEvent, Opportunity]]:
+    """Events eligible to be alerted on.
+
+    Filtered by mode as well as by time. `monitor_all` no longer writes demo
+    events, but events recorded before that change are still stored — and they
+    must be: deleting history to implement a display rule would destroy the
+    record of what the system actually said. Filtering on read keeps the history
+    intact while ensuring an old demo event cannot become a new alert.
+    """
     rows = (
         await session.execute(
-            sa.select(OpportunityChangeEvent, Opportunity)
-            .join(Opportunity, Opportunity.id == OpportunityChangeEvent.opportunity_id)
+            live_only(
+                sa.select(OpportunityChangeEvent, Opportunity).join(
+                    Opportunity, Opportunity.id == OpportunityChangeEvent.opportunity_id
+                )
+            )
             .where(OpportunityChangeEvent.occurred_at >= since)
             .order_by(OpportunityChangeEvent.occurred_at.desc())
             .limit(limit)
