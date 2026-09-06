@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.ai.provider import get_provider
 from app.ai.trend_explainer import explain_trend
 from app.api.deps import current_user, db_session, require_admin
-from app.models.enums import MatchDecision
+from app.models.enums import AnalysisMode, MatchDecision
 from app.models.models import (
     Entity,
     EntityMatchCandidate,
@@ -42,6 +42,7 @@ from app.schemas.trends import (
 from app.services.entities import apply_decision
 from app.services.topics import rebuild_topics
 from app.services.trends import evaluate_trends
+from app.sources.provenance import is_live_source
 
 router = APIRouter(tags=["trends"])
 
@@ -60,6 +61,16 @@ async def list_trends(
     state: str | None = None,
     geo_scope: str | None = None,
     subject_type: str | None = None,
+    analysis_mode: str = Query(
+        default=AnalysisMode.DEMO_INCLUSIVE,
+        pattern="^(demo_inclusive|live_only)$",
+        description=(
+            "Which evidence the returned evaluations were computed from. "
+            "'live_only' returns trends scored from live sources alone; "
+            "'demo_inclusive' returns the mixed-source evaluations. The two are "
+            "separate rows and are never interchanged."
+        ),
+    ),
     min_score: float | None = Query(default=None, ge=0, le=100),
     min_confidence: float | None = Query(default=None, ge=0, le=100),
     include_spikes: bool = Query(default=True, description="Include one-day spikes."),
@@ -70,7 +81,7 @@ async def list_trends(
     _: User = Depends(current_user),
     session: AsyncSession = Depends(db_session),
 ) -> Page[TrendOut]:
-    where = []
+    where = [Trend.analysis_mode == analysis_mode]
     if category:
         where.append(Trend.category == category)
     if stage:
@@ -118,29 +129,61 @@ async def list_trends(
 
 @router.post("/trends/evaluate", response_model=EvaluateResult)
 async def run_evaluation(
-    user: User = Depends(require_admin), session: AsyncSession = Depends(db_session)
+    analysis_mode: str = Query(
+        default=AnalysisMode.DEMO_INCLUSIVE,
+        pattern="^(demo_inclusive|live_only)$",
+        description=(
+            "Which evidence this evaluation may read. 'live_only' excludes demo, "
+            "generator and manually imported sources before anything is measured, "
+            "and writes its result as a separate set of trends."
+        ),
+    ),
+    user: User = Depends(require_admin),
+    session: AsyncSession = Depends(db_session),
 ) -> EvaluateResult:
     """Recompute topics and every trend. Idempotent; updates rather than duplicates."""
-    before = (await session.execute(sa.select(sa.func.count(Trend.id)))).scalar_one()
+    before = (
+        await session.execute(
+            sa.select(sa.func.count(Trend.id)).where(Trend.analysis_mode == analysis_mode)
+        )
+    ).scalar_one()
     topics = await rebuild_topics(session)
-    trends = await evaluate_trends(session)
-    after = (await session.execute(sa.select(sa.func.count(Trend.id)))).scalar_one()
+    trends = await evaluate_trends(session, analysis_mode=analysis_mode)
+    after = (
+        await session.execute(
+            sa.select(sa.func.count(Trend.id)).where(Trend.analysis_mode == analysis_mode)
+        )
+    ).scalar_one()
     session.add(
         SystemAuditLog(
             actor_user_id=user.id,
             actor_label=user.email,
             action="trends.evaluate",
-            after={"evaluated": len(trends), "topics": len(topics)},
+            after={"evaluated": len(trends), "topics": len(topics), "analysis_mode": analysis_mode},
         )
     )
+    if analysis_mode == AnalysisMode.LIVE_ONLY and not trends:
+        detail = (
+            "Live-only evaluation produced no trends: no live source has stored enough "
+            "observations yet. Nothing was filled in from demo evidence. Enable and run a "
+            "live source, then evaluate again."
+        )
+    else:
+        scope = (
+            "from live sources only"
+            if analysis_mode == AnalysisMode.LIVE_ONLY
+            else "from all stored evidence, demo included"
+        )
+        detail = (
+            f"Evaluated {len(trends)} trend(s) {scope} across {len(topics)} topic(s); "
+            f"{int(after) - int(before)} newly detected, the rest updated in place."
+        )
     return EvaluateResult(
         evaluated=len(trends),
         created=int(after) - int(before),
         topics=len(topics),
-        detail=(
-            f"Evaluated {len(trends)} trend(s) across {len(topics)} topic(s); "
-            f"{int(after) - int(before)} newly detected, the rest updated in place."
-        ),
+        analysis_mode=analysis_mode,
+        detail=detail,
     )
 
 
@@ -156,7 +199,7 @@ async def trend_detail(
 
     links = (
         await session.execute(
-            sa.select(TrendSignal, Source.slug, Signal)
+            sa.select(TrendSignal, Source, Signal)
             .join(Source, Source.id == TrendSignal.source_id)
             .join(Signal, Signal.id == TrendSignal.signal_id)
             .where(TrendSignal.trend_id == trend.id)
@@ -164,13 +207,15 @@ async def trend_detail(
         )
     ).all()
     signals_out: list[TrendSignalOut] = []
-    for link, slug, _signal in links:
+    for link, source, _signal in links:
         row = TrendSignalOut.model_validate(link)
-        row.source_slug = slug
+        row.source_slug = source.slug
+        row.is_live_source = is_live_source(source.adapter_key, source.source_class)
         signals_out.append(row)
 
     series: list[TrendPoint] = []
-    for link, slug, signal in links:
+    for link, source, signal in links:
+        slug = source.slug
         observations = (
             (
                 await session.execute(
@@ -227,7 +272,7 @@ async def trend_detail(
                 ),
             )
         )
-    source_ids = {link.source_id for link, _slug, _sig in links}
+    source_ids = {link.source_id for link, _source, _sig in links}
     if source_ids:
         records = (
             await session.execute(

@@ -48,6 +48,7 @@ from app.analytics.skeptic import review as skeptic_review
 from app.core.logging import get_logger
 from app.db.base import as_utc
 from app.models.enums import (
+    AnalysisMode,
     ConditionKind,
     ConditionState,
     OpportunityState,
@@ -200,6 +201,7 @@ async def evaluate_one(
     *,
     context: dict[str, Any],
     validation_status: str,
+    analysis_mode: str = AnalysisMode.DEMO_INCLUSIVE,
     now: datetime,
 ) -> tuple[Opportunity | None, Rejection | None]:
     """Assess one (trend, type) pair. Returns the candidate, or the reason there is none."""
@@ -407,6 +409,7 @@ async def evaluate_one(
         geo=geo,
         context=context,
         validation_status=validation_status,
+        analysis_mode=analysis_mode,
         gate_metrics=gate.metrics,
         now=now,
     )
@@ -446,6 +449,7 @@ async def _upsert(  # noqa: PLR0913 - this is the assembly point; splitting it h
     geo: Any,
     context: dict[str, Any],
     validation_status: str,
+    analysis_mode: str,
     gate_metrics: dict[str, Any],
     now: datetime,
 ) -> Opportunity:
@@ -490,6 +494,7 @@ async def _upsert(  # noqa: PLR0913 - this is the assembly point; splitting it h
         "industry": trend.category,
         "state": state,
         "validation_status": validation_status,
+        "analysis_mode": analysis_mode,
         "maturity_stage": trend.stage,
         "risk_level": risk.level,
         "opportunity_score": score.opportunity_score,
@@ -687,6 +692,7 @@ async def generate_opportunities(
     *,
     contexts: dict[str, dict[str, Any]] | None = None,
     validation_status: str = ValidationStatus.DEMO,
+    analysis_mode: str = AnalysisMode.DEMO_INCLUSIVE,
     now: datetime | None = None,
 ) -> GenerationResult:
     """Run the whole pipeline over every qualifying trend. Safe to run repeatedly.
@@ -695,12 +701,33 @@ async def generate_opportunities(
     series — supplier counts, filings, token distribution — keyed by
     "<trend name>|<opportunity type>" or just "<trend name>". Anything absent
     stays UNKNOWN, and UNKNOWN never earns points.
+
+    `analysis_mode` picks which trends are read. It is a *hard* filter, not a
+    preference: in `live_only` the generator only ever sees trends that were
+    themselves computed from live evidence, so every fact, corroboration count
+    and duplication ratio underneath a live-only candidate is live. In that mode
+    the scenario `contexts` are also refused — they are hand-written demo facts,
+    and letting them in through the analyzer would put demo evidence back into a
+    live-only result by the back door.
     """
     now = now or datetime.now(UTC)
     contexts = contexts or {}
+    live_only = analysis_mode == AnalysisMode.LIVE_ONLY
+    if live_only:
+        contexts = {}
     result = GenerationResult()
 
-    trends = (await session.execute(sa.select(Trend).order_by(Trend.trend_score.desc()))).scalars().all()
+    trends = (
+        (
+            await session.execute(
+                sa.select(Trend)
+                .where(Trend.analysis_mode == analysis_mode)
+                .order_by(Trend.trend_score.desc())
+            )
+        )
+        .scalars()
+        .all()
+    )
 
     for trend in trends:
         entity_types: set[str] = set()
@@ -740,6 +767,7 @@ async def generate_opportunities(
                 opportunity_type,
                 context=context,
                 validation_status=validation_status,
+                analysis_mode=analysis_mode,
                 now=now,
             )
             if opp is not None:
@@ -753,6 +781,7 @@ async def generate_opportunities(
         updated=len(result.updated),
         rejected=len(result.rejections),
         version=OPPORTUNITY_VERSION,
+        analysis_mode=analysis_mode,
     )
     return result
 

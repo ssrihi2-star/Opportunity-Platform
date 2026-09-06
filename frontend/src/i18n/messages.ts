@@ -153,6 +153,28 @@ export const messages = {
       saved: "Saved",
     },
     anomalyLabel: "anomaly",
+    // English-first MVP: the live-only selector. The Arabic locale intentionally
+    // carries the same English strings for now rather than an untested translation.
+    analysis: {
+      label: "Evidence",
+      demoInclusive: "Demo-inclusive",
+      liveOnly: "Live only",
+      demoInclusiveHint:
+        "Everything stored: live sources, offline generators, demo scenarios and the seeded CSV import.",
+      liveOnlyHint:
+        "Only evidence collected from live sources. Demo, generator and manually imported series are excluded before anything is scored.",
+      liveBadge: "LIVE ONLY",
+      demoBadge: "DEMO-INCLUSIVE",
+      liveSourceTag: "live",
+      excludedSourceTag: "not live",
+      mixedWarning:
+        "These figures were computed from live and demo evidence together. Switch to Live only to see what the live evidence alone supports.",
+      noLiveTrends:
+        "No live-only trends yet. No live source has stored enough observations to evaluate, and nothing was filled in from demo evidence. Enable a live source, collect from it, then re-evaluate in Live only mode.",
+      noLiveOpportunities:
+        "No live-only opportunities. There is not enough eligible live evidence to generate a candidate, and no demo evidence was substituted to close the gap.",
+      insufficient: "Not enough live evidence",
+    },
     trends: {
       title: "Trends",
       subtitle:
@@ -652,6 +674,28 @@ export const messages = {
       saved: "تم الحفظ",
     },
     anomalyLabel: "شذوذ",
+    // English-first MVP: the live-only selector. The Arabic locale intentionally
+    // carries the same English strings for now rather than an untested translation.
+    analysis: {
+      label: "Evidence",
+      demoInclusive: "Demo-inclusive",
+      liveOnly: "Live only",
+      demoInclusiveHint:
+        "Everything stored: live sources, offline generators, demo scenarios and the seeded CSV import.",
+      liveOnlyHint:
+        "Only evidence collected from live sources. Demo, generator and manually imported series are excluded before anything is scored.",
+      liveBadge: "LIVE ONLY",
+      demoBadge: "DEMO-INCLUSIVE",
+      liveSourceTag: "live",
+      excludedSourceTag: "not live",
+      mixedWarning:
+        "These figures were computed from live and demo evidence together. Switch to Live only to see what the live evidence alone supports.",
+      noLiveTrends:
+        "No live-only trends yet. No live source has stored enough observations to evaluate, and nothing was filled in from demo evidence. Enable a live source, collect from it, then re-evaluate in Live only mode.",
+      noLiveOpportunities:
+        "No live-only opportunities. There is not enough eligible live evidence to generate a candidate, and no demo evidence was substituted to close the gap.",
+      insufficient: "Not enough live evidence",
+    },
     trends: {
       title: "الاتجاهات",
       subtitle: "ما الذي يتغير، وبأي سرعة، وإلى أي مدى يمكن الوثوق بالأدلة. هذه ليست توصيات.",

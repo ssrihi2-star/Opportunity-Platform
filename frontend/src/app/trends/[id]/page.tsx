@@ -4,7 +4,7 @@ import { useParams } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 import { Guard } from "@/components/Guard";
 import { LineChart } from "@/components/LineChart";
-import { Card, ScoreBar, StatusBadge, vocab } from "@/components/ui";
+import { AnalysisModeBadge, Card, ScoreBar, StatusBadge, vocab } from "@/components/ui";
 import { api } from "@/lib/api";
 import { useApp } from "@/lib/providers";
 import type { TrendDetail } from "@/lib/types";
@@ -111,6 +111,18 @@ function Body() {
       </div>
 
       <p className="text-sm text-[var(--text-secondary)]">{t.trends.notAdvice}</p>
+
+      {/* Which evidence produced every number above. A demo-inclusive page says
+          so plainly rather than letting a reader assume the live sources alone
+          carried the score. */}
+      <div className="flex flex-wrap items-center gap-2">
+        <AnalysisModeBadge mode={data.analysis_mode} />
+        <span className="text-xs text-[var(--text-secondary)]">
+          {data.analysis_mode === "live_only"
+            ? t.analysis.liveOnlyHint
+            : t.analysis.mixedWarning}
+        </span>
+      </div>
 
       {data.warnings.length > 0 && (
         <Card title={t.trends.warningsTitle}>
@@ -231,6 +243,7 @@ function Body() {
               <tr>
                 <th className="text-start py-1">{t.table.signal}</th>
                 <th className="text-start py-1 ps-3">{t.table.source}</th>
+                <th className="text-start py-1 ps-3">{t.analysis.label}</th>
                 <th className="text-start py-1 ps-3">owner</th>
                 <th className="text-end py-1 ps-3">30d</th>
                 <th className="text-end py-1 ps-3">{t.table.observations}</th>
@@ -242,6 +255,9 @@ function Body() {
                 <tr key={s.signal_id} className="border-t" style={{ borderColor: "var(--gridline)" }}>
                   <td className="py-1.5">{s.signal_type.replace(/_/g, " ")}</td>
                   <td className="py-1.5 ps-3 text-[var(--text-secondary)]">{s.source_slug}</td>
+                  <td className="py-1.5 ps-3 text-xs text-[var(--text-muted)]">
+                    {s.is_live_source ? t.analysis.liveSourceTag : t.analysis.excludedSourceTag}
+                  </td>
                   <td className="py-1.5 ps-3 text-[var(--text-muted)]">{s.source_group}</td>
                   <td className="py-1.5 ps-3 text-end tabular" dir="ltr">
                     {s.growth_30d === null ? "—" : `${s.growth_30d.toFixed(1)}%`}

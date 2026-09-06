@@ -23,6 +23,9 @@ class OpportunityOut(BaseModel):
     country: str | None
     state: str
     validation_status: str
+    #: Which evidence this candidate was generated from. A "live_only" row was
+    #: produced without any demo or generated evidence anywhere in its chain.
+    analysis_mode: str
     maturity_stage: str
     risk_level: str
     #: THE GLOBAL OPPORTUNITY SCORE. Identical for every user who reads it.
@@ -212,6 +215,12 @@ class GenerateResult(BaseModel):
     rejected: int
     algorithm_version: str
     validation_status: str
+    analysis_mode: str = "demo_inclusive"
+    #: True when a live-only run produced nothing because there was not enough
+    #: eligible live evidence. Stated plainly rather than shown as an empty list,
+    #: which reads as "nothing is happening" instead of "we could not look".
+    insufficient_live_evidence: bool = False
+    detail: str | None = None
     rejections: list[RejectionOut] = Field(default_factory=list)
 
 

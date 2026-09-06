@@ -181,6 +181,8 @@ export type Trend = {
   name: string;
   category: string | null;
   geo_scope: string;
+  /** Which evidence this evaluation was computed from: "live_only" | "demo_inclusive". */
+  analysis_mode: string;
   state: string;
   stage: string;
   trend_score: number;
@@ -206,6 +208,8 @@ export type TrendSignal = {
   signal_id: string;
   source_id: string;
   source_slug: string | null;
+  /** True when this series came from a source that actually contacts a live upstream. */
+  is_live_source: boolean;
   source_group: string;
   signal_type: string;
   growth_30d: number | null;
@@ -294,6 +298,8 @@ export type Opportunity = {
   country: string | null;
   state: string;
   validation_status: string;
+  /** Which evidence this candidate was generated from: "live_only" | "demo_inclusive". */
+  analysis_mode: string;
   maturity_stage: string;
   risk_level: string;
   /** THE GLOBAL OPPORTUNITY SCORE — identical for every user. */
@@ -448,6 +454,10 @@ export type GenerateResult = {
   rejected: number;
   algorithm_version: string;
   validation_status: string;
+  analysis_mode: string;
+  /** A live-only run that produced nothing because eligible live evidence was too thin. */
+  insufficient_live_evidence: boolean;
+  detail: string | null;
   rejections: { trend_id: string; trend_name: string; opportunity_type: string; reasons: string[] }[];
 };
 
