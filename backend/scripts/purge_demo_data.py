@@ -2,7 +2,7 @@
 
 Defaults to a **dry run**. Nothing is deleted unless `--apply` is passed, and
 even then the whole purge runs in one transaction that is rolled back on any
-error.
+error or on any refusal.
 
 Why the evidence layer and not the results
 ------------------------------------------
@@ -13,33 +13,45 @@ real collections. Instead this purges the *evidence* whose provenance is demo �
 sources, their runs, raw records, signals and observations — and leaves the
 derived rows to be recomputed from whatever survives.
 
-The eligibility rule is not reinvented here. It is `app.sources.provenance`,
-the same function the live-only analysis mode uses, so "what gets purged" and
-"what live-only mode already excludes" cannot drift apart. Under that rule a
-source is demo when its class is `demo`, when its adapter generates its own
-data (`scenario`, `demo_mock`), when its adapter never contacts the network
-(`csv_import` — the seeded manual CSV), or when its adapter is unregistered and
-therefore of unknown provenance.
+Approved targets, and why unknown adapters stop the run
+-------------------------------------------------------
+The set of adapters this installation is allowed to purge is an **explicit
+allow-list**: `demo_mock`, `scenario`, and the seeded `manual_csv` source.
+Nothing else is ever a deletion target.
 
-What is never touched
----------------------
-Users, profiles, preferences, notification channel links (Telegram bindings),
-alert rules, watchlists and notes. Everything user-owned hangs off `users`,
-which this script does not delete from. They are counted before and after in
-`--apply` mode and the transaction aborts if any count moves.
+`app.sources.provenance` is still consulted, but its role here is narrower than
+it looks. That function *fails closed* — it answers "not live" for an adapter it
+cannot recognise, which is right for deciding what to **show** and dangerous for
+deciding what to **delete**. "I do not know what this is" is a reason to stop,
+not a reason to erase. So an unregistered or unrecognised adapter is a **hard
+refusal**: the run aborts and names it, and no deletion happens anywhere until a
+human has classified it.
 
-Two consequences worth reading before you run it
-------------------------------------------------
-**Watchlist entries pointing at demo opportunities are removed explicitly.**
-`watchlist_items.opportunity_id` is `NO ACTION`, so the database would refuse
-the delete rather than cascade. Per the operator's decision the entry is
-removed and the watchlist itself — with all its live entries — is preserved.
+Protected user content is never deleted
+---------------------------------------
+`user_notes` and `user_decisions` are things a person wrote. They are never
+deleted, and they are never quietly detached either. If any of them reference a
+row that this purge would remove, the run **stops and reports them** so the
+operator can decide. The same applies to `opportunity_decisions`.
 
-**Digest bodies are denormalised JSON snapshots.** `digests.sections` contains
-demo titles as plain text, copied at generation time. No row deletion cleans
-them. They are reported, never rewritten: a digest is a record of what was sent
-to somebody on a date, and editing it would falsify that record. Deleting the
-underlying opportunity does not alter the snapshot.
+Everything else user-owned — accounts, profiles, preferences, Telegram links,
+alert rules, watchlists — hangs off `users`, which this script never deletes
+from. Row counts are asserted before and after; the transaction aborts if any
+moves.
+
+Watchlist entries
+-----------------
+Entries pointing at a purged opportunity **or at a purged trend** are removed;
+the watchlists themselves, and all their surviving entries, are preserved. Both
+directions are counted and reported separately, because a list can lose entries
+through either.
+
+Digest bodies are left alone
+----------------------------
+`digests.sections` is a denormalised JSON snapshot containing demo titles as
+plain text, copied at generation time. No row deletion cleans it. It is
+reported, never rewritten: a digest records what was sent to somebody on a date,
+and editing it would falsify that record.
 """
 
 from __future__ import annotations
@@ -47,6 +59,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import sys
+import uuid
 from collections import OrderedDict
 from dataclasses import dataclass, field
 
@@ -56,8 +69,18 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from app.core.config import get_settings
 from app.sources.provenance import live_eligibility
 
-#: Tables whose row counts must be identical before and after. Not a comment —
-#: asserted in `--apply` mode, and the transaction aborts if any of them moves.
+#: The only adapters this installation may purge. An adapter outside this set is
+#: never deleted, whatever `provenance` thinks of it — including adapters that
+#: are merely unregistered, which are a refusal rather than a target.
+APPROVED_DEMO_ADAPTERS: frozenset[str] = frozenset({"demo_mock", "scenario"})
+
+#: The single seeded CSV source approved for removal, matched by slug rather
+#: than adapter: `csv_import` is also how a real user-uploaded file would arrive,
+#: and those must not be swept up with the fixture.
+APPROVED_DEMO_SLUGS: frozenset[str] = frozenset({"manual_csv"})
+
+#: Row counts asserted identical before and after. Not a comment — checked in
+#: `--apply` mode, and the transaction aborts if any of them moves.
 PRESERVE_TABLES: tuple[str, ...] = (
     "users",
     "user_profiles",
@@ -67,8 +90,13 @@ PRESERVE_TABLES: tuple[str, ...] = (
     "watchlists",
     "user_notes",
     "user_decisions",
+    "opportunity_decisions",
     "digests",
 )
+
+
+class PurgeRefused(RuntimeError):
+    """Raised when the purge must not proceed. Carries an operator-facing report."""
 
 
 @dataclass
@@ -77,23 +105,48 @@ class Plan:
 
     demo_sources: list[tuple[str, str, str, str]] = field(default_factory=list)
     live_sources: list[tuple[str, str, str]] = field(default_factory=list)
+    unknown_sources: list[tuple[str, str, str, str]] = field(default_factory=list)
     counts: OrderedDict[str, int] = field(default_factory=OrderedDict)
+    cascades: OrderedDict[str, int] = field(default_factory=OrderedDict)
     preserved: OrderedDict[str, int] = field(default_factory=OrderedDict)
     mixed_trends: int = 0
+    mixed_opportunities: int = 0
+    stale_snapshots: int = 0
     dirty_digests: list[tuple[str, str, int]] = field(default_factory=list)
-    watchlist_hits: list[tuple[str, str, str]] = field(default_factory=list)
-    unregistered: list[str] = field(default_factory=list)
+    watchlist_by_opp: list[tuple[str, str, str]] = field(default_factory=list)
+    watchlist_by_trend: list[tuple[str, str, str]] = field(default_factory=list)
+    protected_blocks: OrderedDict[str, list[str]] = field(default_factory=OrderedDict)
 
 
 async def _scalar(session: AsyncSession, stmt) -> int:
     return int((await session.execute(stmt)).scalar() or 0)
 
 
-async def classify_sources(session: AsyncSession, plan: Plan) -> list[str]:
-    """Split stored sources into demo and live using the live-only rule.
+def _uuid_list(name: str, values: list[str]) -> sa.BindParameter:
+    """An expanding bind parameter explicitly typed as UUID.
 
-    Returns the demo source ids. Reads `sources` only — no adapter is invoked
-    and nothing is fetched.
+    PostgreSQL will not compare `uuid` to `varchar` and raises
+    `operator does not exist: uuid <> character varying`. SQLite coerces
+    silently, so an untyped bind passes there and fails on the real database —
+    which is exactly the class of bug a SQLite-only rehearsal cannot catch.
+    Empty lists still need the type, hence the explicit `type_`.
+    """
+    return sa.bindparam(
+        name, value=[uuid.UUID(str(v)) for v in values], expanding=True, type_=sa.Uuid()
+    )
+
+
+async def classify_sources(session: AsyncSession, plan: Plan) -> list[str]:
+    """Split stored sources into live, approved-demo and unknown.
+
+    Returns the ids approved for deletion. Reads `sources` only — no adapter is
+    invoked and nothing is fetched.
+
+    A source is a deletion target only when it is on the allow-list *and*
+    `provenance` independently agrees it is not live. Requiring both means a
+    mistake in either one fails safe: the allow-list cannot delete something the
+    provenance rule considers live, and the provenance rule cannot delete
+    something the operator has not approved.
     """
     rows = (
         await session.execute(
@@ -103,86 +156,266 @@ async def classify_sources(session: AsyncSession, plan: Plan) -> list[str]:
 
     demo_ids: list[str] = []
     for sid, slug, adapter_key, source_class in rows:
-        eligible, reason = live_eligibility(adapter_key or "", source_class)
-        if eligible:
-            plan.live_sources.append((str(slug), str(adapter_key), str(source_class)))
-        else:
+        adapter = adapter_key or ""
+        approved = adapter in APPROVED_DEMO_ADAPTERS or slug in APPROVED_DEMO_SLUGS
+        eligible, reason = live_eligibility(adapter, source_class)
+
+        if approved and not eligible:
             demo_ids.append(str(sid))
-            plan.demo_sources.append((str(slug), str(adapter_key), str(source_class), reason))
-            if "not registered" in reason:
-                plan.unregistered.append(str(slug))
+            plan.demo_sources.append((str(slug), adapter, str(source_class), reason))
+        elif eligible:
+            plan.live_sources.append((str(slug), adapter, str(source_class)))
+        else:
+            # Not live, but not approved either: unknown provenance. This is the
+            # case that must stop the run rather than be deleted.
+            plan.unknown_sources.append((str(slug), adapter, str(source_class), reason))
     return demo_ids
 
 
+async def _all_demo_trend_ids(session: AsyncSession, ids) -> list[str]:
+    """Trends whose every signal is demo, resolved to concrete ids **first**.
+
+    Resolved up front rather than left as a subquery, because the deletes below
+    empty `trend_signals`, and the predicate that identifies these trends reads
+    `trend_signals`. Evaluated late it matches nothing and silently leaves the
+    trends behind.
+    """
+    rows = (
+        await session.execute(
+            sa.text(
+                "SELECT t.id FROM trends t WHERE EXISTS ("
+                "  SELECT 1 FROM trend_signals ts WHERE ts.trend_id = t.id"
+                ") AND NOT EXISTS ("
+                "  SELECT 1 FROM trend_signals ts WHERE ts.trend_id = t.id AND ts.source_id NOT IN :ids"
+                ")"
+            ).bindparams(ids)
+        )
+    ).all()
+    return [str(r[0]) for r in rows]
+
+
+async def check_protected_content(session: AsyncSession, ids, tids) -> OrderedDict[str, list[str]]:
+    """Find protected user content that the purge would otherwise destroy.
+
+    Returns a mapping of table -> human-readable descriptions. A non-empty result
+    means the run must stop: these rows are things a person wrote, and neither
+    deleting them nor silently detaching them is a decision this script may take.
+    """
+    blocks: OrderedDict[str, list[str]] = OrderedDict()
+    doomed_opps = (
+        "SELECT id FROM opportunities WHERE primary_trend_id IN "
+        "(SELECT id FROM trends WHERE id IN :tids)"
+    )
+
+    for table, label_sql in (
+        (
+            "user_notes",
+            "SELECT u.email, o.title, substr(n.body, 1, 60) FROM user_notes n "
+            "JOIN users u ON u.id = n.user_id JOIN opportunities o ON o.id = n.opportunity_id "
+            f"WHERE n.opportunity_id IN ({doomed_opps})",
+        ),
+        (
+            "user_decisions",
+            "SELECT u.email, o.title, d.decision FROM user_decisions d "
+            "JOIN users u ON u.id = d.user_id JOIN opportunities o ON o.id = d.opportunity_id "
+            f"WHERE d.opportunity_id IN ({doomed_opps})",
+        ),
+        (
+            "opportunity_decisions",
+            "SELECT u.email, o.title, d.interest FROM opportunity_decisions d "
+            "JOIN users u ON u.id = d.user_id JOIN opportunities o ON o.id = d.opportunity_id "
+            f"WHERE d.opportunity_id IN ({doomed_opps})",
+        ),
+    ):
+        try:
+            rows = (await session.execute(sa.text(label_sql).bindparams(tids))).all()
+        except Exception:  # noqa: BLE001 - a missing optional column must not mask the check
+            rows = (
+                await session.execute(
+                    sa.text(
+                        f"SELECT '?', '?', '?' FROM {table} "  # noqa: S608 - fixed identifier
+                        f"WHERE opportunity_id IN ({doomed_opps})"
+                    ).bindparams(tids)
+                )
+            ).all()
+        if rows:
+            blocks[table] = [f"{a} — {b} — {str(c)[:60]}" for a, b, c in rows]
+    return blocks
+
+
 async def build_plan(session: AsyncSession) -> Plan:
-    """Count everything the purge would remove. Pure reads."""
+    """Count everything the purge would remove. Pure reads, no mutation."""
     plan = Plan()
     demo_ids = await classify_sources(session, plan)
 
-    if not demo_ids:
+    async def preserved() -> None:
         for table in PRESERVE_TABLES:
             plan.preserved[table] = await _scalar(
                 session, sa.text(f"SELECT count(*) FROM {table}")  # noqa: S608 - fixed literals
             )
+
+    if plan.unknown_sources or not demo_ids:
+        await preserved()
         return plan
 
-    ids = sa.bindparam("ids", value=demo_ids, expanding=True)
+    ids = _uuid_list("ids", demo_ids)
+    demo_trend_ids = await _all_demo_trend_ids(session, ids)
+    tids = _uuid_list("tids", demo_trend_ids)
 
-    # Evidence directly attributable to a demo source.
-    plan.counts["source_runs"] = await _scalar(
-        session, sa.text("SELECT count(*) FROM source_runs WHERE source_id IN :ids").bindparams(ids)
+    plan.protected_blocks = await check_protected_content(session, ids, tids)
+
+    doomed_opps = (
+        "SELECT id FROM opportunities WHERE primary_trend_id IN "
+        "(SELECT id FROM trends WHERE id IN :tids)"
     )
-    plan.counts["raw_records"] = await _scalar(
-        session, sa.text("SELECT count(*) FROM raw_records WHERE source_id IN :ids").bindparams(ids)
-    )
-    plan.counts["signals"] = await _scalar(
-        session, sa.text("SELECT count(*) FROM signals WHERE source_id IN :ids").bindparams(ids)
-    )
-    # Observations have no source column; they belong to a demo signal.
+    demo_signals = "SELECT id FROM signals WHERE source_id IN :ids"
+
+    # ---- directly deleted, keyed by the demo source -------------------------
+    for table, where, params in (
+        ("source_runs", "source_id IN :ids", (ids,)),
+        ("raw_records", "source_id IN :ids", (ids,)),
+        ("signals", "source_id IN :ids", (ids,)),
+        ("trend_signals", "source_id IN :ids", (ids,)),
+        ("source_validations", "source_id IN :ids", (ids,)),
+        ("source_credentials", "source_id IN :ids", (ids,)),
+        ("http_cache_entries", "source_id IN :ids", (ids,)),
+        ("country_facts", "source_id IN :ids", (ids,)),
+        ("entity_match_candidates", "source_id IN :ids", (ids,)),
+    ):
+        plan.counts[table] = await _scalar(
+            session,
+            sa.text(f"SELECT count(*) FROM {table} WHERE {where}").bindparams(*params),  # noqa: S608
+        )
     plan.counts["signal_observations"] = await _scalar(
         session,
         sa.text(
-            "SELECT count(*) FROM signal_observations o "
-            "JOIN signals s ON s.id = o.signal_id WHERE s.source_id IN :ids"
+            f"SELECT count(*) FROM signal_observations WHERE signal_id IN ({demo_signals})"
         ).bindparams(ids),
-    )
-    plan.counts["trend_signals"] = await _scalar(
-        session, sa.text("SELECT count(*) FROM trend_signals WHERE source_id IN :ids").bindparams(ids)
-    )
-    plan.counts["evidence_items"] = await _scalar(
-        session, sa.text("SELECT count(*) FROM evidence_items WHERE source_id IN :ids").bindparams(ids)
-    )
-    plan.counts["country_facts"] = await _scalar(
-        session, sa.text("SELECT count(*) FROM country_facts WHERE source_id IN :ids").bindparams(ids)
-    )
-    plan.counts["entity_match_candidates"] = await _scalar(
-        session,
-        sa.text("SELECT count(*) FROM entity_match_candidates WHERE source_id IN :ids").bindparams(ids),
-    )
-    plan.counts["http_cache_entries"] = await _scalar(
-        session, sa.text("SELECT count(*) FROM http_cache_entries WHERE source_id IN :ids").bindparams(ids)
-    )
-    plan.counts["source_validations"] = await _scalar(
-        session, sa.text("SELECT count(*) FROM source_validations WHERE source_id IN :ids").bindparams(ids)
-    )
-    plan.counts["source_credentials"] = await _scalar(
-        session, sa.text("SELECT count(*) FROM source_credentials WHERE source_id IN :ids").bindparams(ids)
     )
     plan.counts["sources"] = len(demo_ids)
+    plan.counts["trends (all-demo)"] = len(demo_trend_ids)
+    plan.counts["opportunities (from all-demo trends)"] = await _scalar(
+        session, sa.text(f"SELECT count(*) FROM ({doomed_opps}) q").bindparams(tids)
+    )
 
-    # Derived results. A trend is purged when *every* signal behind it is demo;
-    # one with any live signal is left for recomputation instead, because
-    # deleting it would discard a conclusion partly built on real evidence.
-    plan.counts["trends (all-demo)"] = await _scalar(
+    # ---- references to purged evidence held by SURVIVING rows ---------------
+    # These are the joins that make a naive purge fail on PostgreSQL. Both are
+    # NO ACTION, so the database refuses the delete rather than cascading, and
+    # both can belong to a *mixed* opportunity that is itself being kept.
+    plan.counts["opportunity_signals (-> purged signals)"] = await _scalar(
         session,
         sa.text(
-            "SELECT count(*) FROM trends t WHERE EXISTS ("
-            "  SELECT 1 FROM trend_signals ts WHERE ts.trend_id = t.id"
-            ") AND NOT EXISTS ("
-            "  SELECT 1 FROM trend_signals ts WHERE ts.trend_id = t.id AND ts.source_id NOT IN :ids"
-            ")"
+            f"SELECT count(*) FROM opportunity_signals WHERE signal_id IN ({demo_signals})"
         ).bindparams(ids),
     )
+    plan.counts["evidence_items (-> purged evidence)"] = await _scalar(
+        session,
+        sa.text(
+            "SELECT count(*) FROM evidence_items WHERE source_id IN :ids "
+            "OR raw_record_id IN (SELECT id FROM raw_records WHERE source_id IN :ids) "
+            "OR signal_observation_id IN "
+            f"(SELECT id FROM signal_observations WHERE signal_id IN ({demo_signals}))"
+        ).bindparams(ids),
+    )
+    # How many of those belong to opportunities that SURVIVE — the mixed case.
+    plan.mixed_opportunities = await _scalar(
+        session,
+        sa.text(
+            "SELECT count(DISTINCT opportunity_id) FROM ("
+            f"  SELECT opportunity_id FROM opportunity_signals WHERE signal_id IN ({demo_signals})"
+            "  UNION"
+            "  SELECT opportunity_id FROM evidence_items WHERE source_id IN :ids"
+            ") q WHERE opportunity_id IS NOT NULL "
+            f"AND opportunity_id NOT IN ({doomed_opps})"
+        ).bindparams(ids, tids),
+    )
+
+    # ---- the model_runs cycle ----------------------------------------------
+    # trends -> model_runs -> opportunities -> trends. All three FKs are NO
+    # ACTION and nullable, so the cycle is broken by detaching, not deleting.
+    plan.counts["model_runs (detached from purged opportunities)"] = await _scalar(
+        session,
+        sa.text(
+            f"SELECT count(*) FROM model_runs WHERE opportunity_id IN ({doomed_opps})"
+        ).bindparams(tids),
+    )
+    plan.cascades["trends.explanation_model_run_id (nulled)"] = await _scalar(
+        session,
+        sa.text(
+            "SELECT count(*) FROM trends WHERE explanation_model_run_id IN "
+            f"(SELECT id FROM model_runs WHERE opportunity_id IN ({doomed_opps}))"
+        ).bindparams(tids),
+    )
+
+    # ---- cascade-affected children of purged opportunities/trends -----------
+    for table in (
+        "opportunity_scores",
+        "opportunity_participation",
+        "opportunity_conditions",
+        "opportunity_topics",
+        "opportunity_trends",
+        "opportunity_entities",
+        "opportunity_risks",
+        "opportunity_change_events",
+        "user_opportunity_relevance",
+        "user_opportunity_feedback",
+        "alert_deliveries",
+        "reports",
+        "skeptic_reviews",
+        "predictions",
+        "alerts",
+    ):
+        plan.cascades[table] = await _scalar(
+            session,
+            sa.text(
+                f"SELECT count(*) FROM {table} WHERE opportunity_id IN ({doomed_opps})"  # noqa: S608
+            ).bindparams(tids),
+        )
+    plan.cascades["condition_checks"] = await _scalar(
+        session,
+        sa.text(
+            "SELECT count(*) FROM condition_checks WHERE condition_id IN "
+            f"(SELECT id FROM opportunity_conditions WHERE opportunity_id IN ({doomed_opps}))"
+        ).bindparams(tids),
+    )
+    plan.cascades["trend_snapshots (of purged trends)"] = await _scalar(
+        session,
+        sa.text("SELECT count(*) FROM trend_snapshots WHERE trend_id IN :tids").bindparams(tids),
+    )
+
+    # ---- watchlist entries, both directions ---------------------------------
+    plan.watchlist_by_opp = [
+        (str(a), str(b), str(c))
+        for a, b, c in (
+            await session.execute(
+                sa.text(
+                    "SELECT w.name, o.title, u.email FROM watchlist_items wi "
+                    "JOIN watchlists w ON w.id = wi.watchlist_id "
+                    "JOIN users u ON u.id = w.user_id "
+                    "JOIN opportunities o ON o.id = wi.opportunity_id "
+                    f"WHERE wi.opportunity_id IN ({doomed_opps}) ORDER BY u.email, w.name"
+                ).bindparams(tids)
+            )
+        ).all()
+    ]
+    plan.watchlist_by_trend = [
+        (str(a), str(b), str(c))
+        for a, b, c in (
+            await session.execute(
+                sa.text(
+                    "SELECT w.name, t.name, u.email FROM watchlist_items wi "
+                    "JOIN watchlists w ON w.id = wi.watchlist_id "
+                    "JOIN users u ON u.id = w.user_id "
+                    "JOIN trends t ON t.id = wi.trend_id "
+                    "WHERE wi.trend_id IN :tids ORDER BY u.email, w.name"
+                ).bindparams(tids)
+            )
+        ).all()
+    ]
+    plan.counts["watchlist_items (via opportunity)"] = len(plan.watchlist_by_opp)
+    plan.counts["watchlist_items (via trend)"] = len(plan.watchlist_by_trend)
+
+    # ---- what survives but is now stale -------------------------------------
     plan.mixed_trends = await _scalar(
         session,
         sa.text(
@@ -193,43 +426,19 @@ async def build_plan(session: AsyncSession) -> Plan:
             ")"
         ).bindparams(ids),
     )
-    plan.counts["opportunities (from all-demo trends)"] = await _scalar(
+    plan.stale_snapshots = await _scalar(
         session,
         sa.text(
-            "SELECT count(*) FROM opportunities o WHERE o.primary_trend_id IN ("
+            "SELECT count(*) FROM trend_snapshots WHERE trend_id IN ("
             "  SELECT t.id FROM trends t WHERE EXISTS ("
-            "    SELECT 1 FROM trend_signals ts WHERE ts.trend_id = t.id"
-            "  ) AND NOT EXISTS ("
+            "    SELECT 1 FROM trend_signals ts WHERE ts.trend_id = t.id AND ts.source_id IN :ids"
+            "  ) AND EXISTS ("
             "    SELECT 1 FROM trend_signals ts WHERE ts.trend_id = t.id AND ts.source_id NOT IN :ids"
             "  )"
             ")"
         ).bindparams(ids),
     )
 
-    # Watchlist entries that would block the delete (NO ACTION, not CASCADE).
-    plan.watchlist_hits = [
-        (str(a), str(b), str(c))
-        for a, b, c in (
-            await session.execute(
-                sa.text(
-                    "SELECT w.name, o.title, u.email FROM watchlist_items wi "
-                    "JOIN watchlists w ON w.id = wi.watchlist_id "
-                    "JOIN users u ON u.id = w.user_id "
-                    "JOIN opportunities o ON o.id = wi.opportunity_id "
-                    "WHERE o.primary_trend_id IN ("
-                    "  SELECT t.id FROM trends t WHERE EXISTS ("
-                    "    SELECT 1 FROM trend_signals ts WHERE ts.trend_id = t.id"
-                    "  ) AND NOT EXISTS ("
-                    "    SELECT 1 FROM trend_signals ts WHERE ts.trend_id=t.id AND ts.source_id NOT IN :ids"
-                    "  )"
-                    ") ORDER BY u.email, w.name"
-                ).bindparams(ids)
-            )
-        ).all()
-    ]
-    plan.counts["watchlist_items (demo entries)"] = len(plan.watchlist_hits)
-
-    # Digests whose stored JSON names a demo opportunity. Reported only.
     for did, freq, sections in (
         await session.execute(sa.text("SELECT id, frequency, sections FROM digests"))
     ).all():
@@ -239,23 +448,14 @@ async def build_plan(session: AsyncSession) -> Plan:
         hits = await _scalar(
             session,
             sa.text(
-                "SELECT count(*) FROM opportunities o WHERE o.title IN :titles "
-                "AND o.primary_trend_id IN ("
-                "  SELECT t.id FROM trends t WHERE EXISTS ("
-                "    SELECT 1 FROM trend_signals ts WHERE ts.trend_id = t.id"
-                "  ) AND NOT EXISTS ("
-                "    SELECT 1 FROM trend_signals ts WHERE ts.trend_id=t.id AND ts.source_id NOT IN :ids"
-                "  )"
-                ")"
-            ).bindparams(ids, sa.bindparam("titles", value=list(titles), expanding=True)),
+                f"SELECT count(*) FROM opportunities o WHERE o.title IN :titles "
+                f"AND o.id IN ({doomed_opps})"
+            ).bindparams(tids, sa.bindparam("titles", value=list(titles), expanding=True)),
         )
         if hits:
             plan.dirty_digests.append((str(did), str(freq), hits))
 
-    for table in PRESERVE_TABLES:
-        plan.preserved[table] = await _scalar(
-            session, sa.text(f"SELECT count(*) FROM {table}")  # noqa: S608 - fixed literals
-        )
+    await preserved()
     return plan
 
 
@@ -272,71 +472,64 @@ def _titles_in(sections: object) -> set[str]:
     return found
 
 
-async def _all_demo_trend_ids(session: AsyncSession, ids) -> list[str]:
-    """Trends whose every signal is demo, resolved to concrete ids **first**.
-
-    Resolved up front rather than left as a subquery, because the deletes below
-    empty `trend_signals`, and the predicate that identifies these trends reads
-    `trend_signals`. Evaluated late it matches nothing and silently leaves the
-    trends behind — which is exactly the bug this function exists to prevent.
-    """
-    rows = (
-        await session.execute(
-            sa.text(
-                "SELECT t.id FROM trends t WHERE EXISTS ("
-                "  SELECT 1 FROM trend_signals ts WHERE ts.trend_id = t.id"
-                ") AND NOT EXISTS ("
-                "  SELECT 1 FROM trend_signals ts WHERE ts.trend_id = t.id AND ts.source_id NOT IN :ids"
-                ")"
-            ).bindparams(ids)
-        )
-    ).all()
-    return [str(r[0]) for r in rows]
-
-
 async def apply_purge(session: AsyncSession, demo_ids: list[str]) -> None:
-    """Delete, in FK-safe order. Caller owns the transaction.
+    """Delete, in an order PostgreSQL accepts. Caller owns the transaction.
 
-    Ordering rules that are not obvious and were both got wrong once:
+    Ordering constraints that are not obvious, each of which breaks the run on
+    PostgreSQL if got wrong (SQLite is laxer and hides several of them):
 
     * The all-demo trend set is resolved to ids *before* anything is deleted,
       because the predicate identifying it reads `trend_signals`.
-    * `source_runs` is deleted explicitly. Postgres would cascade it from
-      `sources`, but `raw_records.source_run_id` is `NO ACTION`, so the cascade
-      can be refused; and SQLite does not enforce it at all, which is how a
-      missing delete here passed unnoticed on a SQLite rehearsal.
+    * `opportunity_signals` and `evidence_items` are `NO ACTION` references to
+      signals, observations, raw records and sources. They must go before their
+      targets — including rows owned by *surviving* mixed opportunities, which
+      no cascade will ever reach.
+    * The `trends -> model_runs -> opportunities -> trends` cycle is broken by
+      nulling the two nullable NO ACTION edges before deleting either end.
+    * `raw_records` precedes `source_runs`, because `raw_records.source_run_id`
+      is NO ACTION.
     """
-    ids = sa.bindparam("ids", value=demo_ids, expanding=True)
-
+    ids = _uuid_list("ids", demo_ids)
     demo_trend_ids = await _all_demo_trend_ids(session, ids)
-    tids = sa.bindparam("tids", value=demo_trend_ids or [""], expanding=True)
-    all_demo_trends = "SELECT id FROM trends WHERE id IN :tids"
+    tids = _uuid_list("tids", demo_trend_ids)
 
-    # Children with NO ACTION first: the database will not cascade these, so
-    # they are removed explicitly or the delete is refused.
-    for stmt in (
-        f"DELETE FROM watchlist_items WHERE opportunity_id IN "
-        f"(SELECT id FROM opportunities WHERE primary_trend_id IN ({all_demo_trends}))",
-        f"DELETE FROM user_notes WHERE opportunity_id IN "
-        f"(SELECT id FROM opportunities WHERE primary_trend_id IN ({all_demo_trends}))",
-        f"DELETE FROM user_decisions WHERE opportunity_id IN "
-        f"(SELECT id FROM opportunities WHERE primary_trend_id IN ({all_demo_trends}))",
-        f"DELETE FROM alerts WHERE opportunity_id IN "
-        f"(SELECT id FROM opportunities WHERE primary_trend_id IN ({all_demo_trends}))",
-        f"DELETE FROM predictions WHERE opportunity_id IN "
-        f"(SELECT id FROM opportunities WHERE primary_trend_id IN ({all_demo_trends}))",
-        f"DELETE FROM model_runs WHERE opportunity_id IN "
-        f"(SELECT id FROM opportunities WHERE primary_trend_id IN ({all_demo_trends}))",
-        f"DELETE FROM opportunities WHERE primary_trend_id IN ({all_demo_trends})",
-        f"DELETE FROM watchlist_items WHERE trend_id IN ({all_demo_trends})",
-        "DELETE FROM evidence_items WHERE source_id IN :ids",
+    doomed_opps = (
+        "SELECT id FROM opportunities WHERE primary_trend_id IN "
+        "(SELECT id FROM trends WHERE id IN :tids)"
+    )
+    demo_signals = "SELECT id FROM signals WHERE source_id IN :ids"
+    demo_obs = f"SELECT id FROM signal_observations WHERE signal_id IN ({demo_signals})"
+    demo_raw = "SELECT id FROM raw_records WHERE source_id IN :ids"
+
+    statements = (
+        # 1. Break the model_runs cycle by detaching, never deleting a user-
+        #    facing explanation from a trend that survives.
+        "UPDATE trends SET explanation_model_run_id = NULL WHERE explanation_model_run_id IN "
+        f"(SELECT id FROM model_runs WHERE opportunity_id IN ({doomed_opps}))",
+        "UPDATE reports SET model_run_id = NULL WHERE model_run_id IN "
+        f"(SELECT id FROM model_runs WHERE opportunity_id IN ({doomed_opps}))",
+        "UPDATE skeptic_reviews SET model_run_id = NULL WHERE model_run_id IN "
+        f"(SELECT id FROM model_runs WHERE opportunity_id IN ({doomed_opps}))",
+        f"DELETE FROM model_runs WHERE opportunity_id IN ({doomed_opps})",
+        # 2. NO ACTION references to purged evidence, from any owner — including
+        #    surviving mixed opportunities.
+        f"DELETE FROM opportunity_signals WHERE signal_id IN ({demo_signals})",
+        "DELETE FROM evidence_items WHERE source_id IN :ids "
+        f"OR raw_record_id IN ({demo_raw}) OR signal_observation_id IN ({demo_obs})",
+        # 3. NO ACTION children of the opportunities being removed.
+        f"DELETE FROM watchlist_items WHERE opportunity_id IN ({doomed_opps})",
+        "DELETE FROM watchlist_items WHERE trend_id IN :tids",
+        f"DELETE FROM alerts WHERE opportunity_id IN ({doomed_opps})",
+        f"DELETE FROM predictions WHERE opportunity_id IN ({doomed_opps})",
+        # 4. The opportunities themselves; their CASCADE children follow.
+        "DELETE FROM opportunities WHERE primary_trend_id IN "
+        "(SELECT id FROM trends WHERE id IN :tids)",
+        # 5. Trend-level evidence links, then the trends.
         "DELETE FROM trend_signals WHERE source_id IN :ids",
-        f"DELETE FROM trends WHERE id IN ({all_demo_trends})",
-        "DELETE FROM signal_observations WHERE signal_id IN "
-        "(SELECT id FROM signals WHERE source_id IN :ids)",
+        "DELETE FROM trends WHERE id IN :tids",
+        # 6. The evidence itself.
+        f"DELETE FROM signal_observations WHERE signal_id IN ({demo_signals})",
         "DELETE FROM signals WHERE source_id IN :ids",
-        # Before source_runs: raw_records.source_run_id is NO ACTION, so runs
-        # cannot go first.
         "DELETE FROM raw_records WHERE source_id IN :ids",
         "DELETE FROM raw_records WHERE source_run_id IN "
         "(SELECT id FROM source_runs WHERE source_id IN :ids)",
@@ -347,11 +540,79 @@ async def apply_purge(session: AsyncSession, demo_ids: list[str]) -> None:
         "DELETE FROM country_facts WHERE source_id IN :ids",
         "DELETE FROM entity_match_candidates WHERE source_id IN :ids",
         "DELETE FROM sources WHERE id IN :ids",
-    ):
-        # Each statement uses one or both placeholders; bind only what it names.
+    )
+
+    for stmt in statements:
         clause = sa.text(stmt)
         wanted = [p for p, present in ((ids, ":ids" in stmt), (tids, ":tids" in stmt)) if present]
         await session.execute(clause.bindparams(*wanted) if wanted else clause)
+
+
+RECOMPUTE_PROCEDURE = """\
+RECOMPUTING MIXED RESULTS
+=========================
+A mixed trend is one that drew on both live and demo evidence. Its demo signals
+are gone, but its stored numbers were computed while they were present, so until
+it is re-evaluated it is displaying a score derived from evidence that no longer
+exists.
+
+  1. Re-evaluate trends, which recomputes score, confidence, stage and state
+     from surviving evidence only:
+
+       docker compose exec api python -c "
+       import asyncio
+       from app.db.session import session_scope
+       from app.services.trends import evaluate_trends
+       async def main():
+           async with session_scope() as s:
+               print(await evaluate_trends(s))
+       asyncio.run(main())"
+
+  2. Regenerate opportunities from the re-evaluated trends:
+
+       docker compose exec api python -c "
+       import asyncio
+       from app.db.session import session_scope
+       from app.services.opportunities import generate_opportunities
+       async def main():
+           async with session_scope() as s:
+               print(await generate_opportunities(s))
+       asyncio.run(main())"
+
+HOW STALE VALUES ARE PREVENTED FROM INFLUENCING THE REBUILD
+-----------------------------------------------------------
+Most stored fields are overwritten unconditionally on re-evaluation, so they
+cannot contaminate anything. Three do not, and they are the reason this section
+exists rather than a bare "re-run the pipeline":
+
+* `trends.peak_score` / `peak_score_at` are MONOTONIC. `_upsert_trend` only ever
+  raises the peak (`if result.trend_score > trend.peak_score`), and `next_state`
+  compares the new score against it: a fall of WEAKENING_DROP points from peak
+  moves a trend to "weakening". A peak inflated by demo evidence therefore
+  survives the purge and can push a correctly-scored trend into a decline state
+  it never actually entered. Reset it for affected trends BEFORE step 1:
+
+      UPDATE trends SET peak_score = trend_score, peak_score_at = last_evaluated_at
+      WHERE id IN (<mixed trend ids reported above>);
+
+  This script prints the count; it does not perform the reset, because it
+  rewrites analytical values rather than removing demo data and belongs to the
+  recomputation step, not the purge.
+
+* `trend_snapshots` are immutable history, one row per evaluation. Snapshots
+  written while demo evidence was present are NOT deleted for surviving trends —
+  they record what the system genuinely reported at the time. They are inputs to
+  nothing: `_upsert_trend` never reads them back, so they cannot influence a
+  rebuild. The count of such rows is reported so the staleness is visible.
+
+* `opportunity_scores` is likewise append-only history and is not read back
+  during generation.
+
+After step 2, verify no surviving trend still claims demo evidence:
+
+    SELECT count(*) FROM trend_signals ts
+      LEFT JOIN sources s ON s.id = ts.source_id WHERE s.id IS NULL;   -- expect 0
+"""
 
 
 def render(plan: Plan, *, applied: bool) -> None:
@@ -362,63 +623,90 @@ def render(plan: Plan, *, applied: bool) -> None:
     for slug, adapter, cls in plan.live_sources:
         print(f"  KEEP    {slug:<28} {adapter:<20} {cls}")
 
+    if plan.unknown_sources:
+        print(f"\n!! UNKNOWN sources — RUN REFUSED ({len(plan.unknown_sources)}):")
+        for slug, adapter, cls, reason in plan.unknown_sources:
+            print(f"  BLOCK   {slug:<28} {adapter:<20} {cls}")
+            print(f"          {reason}")
+        print(
+            "\n  These are not live, but they are not on the approved list either, so\n"
+            "  their provenance is unverified. Deleting data on a guess is not\n"
+            "  something this script will do. Approved for this installation:\n"
+            f"    adapters {sorted(APPROVED_DEMO_ADAPTERS)}, slugs {sorted(APPROVED_DEMO_SLUGS)}\n"
+            "  Classify each source above, then re-run."
+        )
+        return
+
     print(f"\nDEMO sources to remove ({len(plan.demo_sources)}):")
     for slug, adapter, cls, reason in plan.demo_sources:
         print(f"  REMOVE  {slug:<28} {adapter:<20} {cls}")
         print(f"          reason: {reason}")
 
-    if plan.unregistered:
+    if plan.protected_blocks:
+        print("\n!! PROTECTED USER CONTENT — RUN REFUSED:")
+        for table, entries in plan.protected_blocks.items():
+            print(f"\n  {table} ({len(entries)}):")
+            for entry in entries[:20]:
+                print(f"    - {entry}")
+            if len(entries) > 20:
+                print(f"    ... and {len(entries) - 20} more")
         print(
-            "\n  NOTE: these were classed demo only because their adapter is not\n"
-            "  registered, so their provenance cannot be verified. If any is a real\n"
-            "  live source, stop and say so — the rule fails closed on purpose:\n"
-            f"    {', '.join(plan.unregistered)}"
+            "\n  These rows are content a person wrote about an opportunity this purge\n"
+            "  would delete. They are never deleted and never silently detached, so\n"
+            "  the run stops here. Move or remove them deliberately, then re-run."
         )
+        return
 
-    print("\nRows affected:")
-    if not plan.counts:
-        print("  (no demo sources found — nothing to do)")
+    print("\nDirectly deleted:")
     for table, count in plan.counts.items():
         print(f"  {count:>8}  {table}")
 
-    if plan.mixed_trends:
+    print("\nCascade-affected (removed by the database with their parent):")
+    for table, count in plan.cascades.items():
+        print(f"  {count:>8}  {table}")
+
+    if plan.mixed_opportunities:
         print(
-            f"\n  {plan.mixed_trends} trend(s) draw on BOTH live and demo evidence and are NOT\n"
-            "  deleted. Their stored numbers still reflect the demo evidence until you\n"
-            "  re-run trend evaluation, which is the intended next step."
+            f"\n  {plan.mixed_opportunities} SURVIVING opportunity(ies) hold references to purged\n"
+            "  evidence via opportunity_signals / evidence_items. Those links are removed;\n"
+            "  the opportunities themselves are kept and must be recomputed."
         )
 
-    if plan.watchlist_hits:
-        print(f"\nWatchlist entries removed ({len(plan.watchlist_hits)}) — lists themselves kept:")
-        for wl, title, email in plan.watchlist_hits:
-            print(f"  {email:<28} {wl:<20} -> {title}")
+    if plan.watchlist_by_opp or plan.watchlist_by_trend:
+        print("\nWatchlist entries removed — the lists themselves are kept:")
+        for wl, title, email in plan.watchlist_by_opp:
+            print(f"  [opportunity] {email:<26} {wl:<20} -> {title}")
+        for wl, name, email in plan.watchlist_by_trend:
+            print(f"  [trend]       {email:<26} {wl:<20} -> {name}")
 
     if plan.dirty_digests:
-        print(f"\nDigests naming demo opportunities in stored JSON ({len(plan.dirty_digests)}):")
+        print(f"\nDigests naming purged opportunities in stored JSON ({len(plan.dirty_digests)}):")
         for did, freq, hits in plan.dirty_digests:
             print(f"  {freq:<8} {did}  ({hits} demo title(s))")
         print(
-            "  These are historical snapshots of messages already sent. They are left\n"
-            "  exactly as they are: rewriting them would falsify the delivery record."
+            "  Historical snapshots of messages already sent. Left exactly as they are:\n"
+            "  rewriting them would falsify the delivery record."
         )
 
     print("\nPreserved (asserted unchanged when applying):")
     for table, count in plan.preserved.items():
         print(f"  {count:>8}  {table}")
 
+    if plan.mixed_trends or plan.stale_snapshots:
+        print(
+            f"\n  {plan.mixed_trends} trend(s) drew on BOTH live and demo evidence and are NOT\n"
+            f"  deleted. {plan.stale_snapshots} snapshot(s) of them predate the purge.\n"
+            "  Their stored scores still reflect demo evidence until recomputed."
+        )
+        print(f"\n{RECOMPUTE_PROCEDURE}")
+
 
 async def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--apply",
-        action="store_true",
-        help="Actually delete. Without this the script only reports.",
+        "--apply", action="store_true", help="Actually delete. Without this the script only reports."
     )
-    parser.add_argument(
-        "--database-url",
-        default=None,
-        help="Override the configured DATABASE_URL.",
-    )
+    parser.add_argument("--database-url", default=None, help="Override the configured DATABASE_URL.")
     args = parser.parse_args()
 
     url = args.database_url or get_settings().DATABASE_URL
@@ -432,6 +720,11 @@ async def main() -> int:
         async with maker() as session:
             plan = await build_plan(session)
 
+            if plan.unknown_sources or plan.protected_blocks:
+                render(plan, applied=False)
+                print("\nREFUSED. Nothing was deleted.\n")
+                return 2
+
             if not args.apply:
                 render(plan, applied=False)
                 print(
@@ -444,21 +737,15 @@ async def main() -> int:
             demo_ids = await classify_sources(session, Plan())
             before = dict(plan.preserved)
 
-            # The planning reads above already opened a transaction on this
-            # session; the deletes join it, and it is committed only if the
-            # preservation check passes.
             try:
                 await apply_purge(session, demo_ids)
-
                 after = {
                     t: await _scalar(session, sa.text(f"SELECT count(*) FROM {t}"))  # noqa: S608
                     for t in PRESERVE_TABLES
                 }
                 moved = {t: (before[t], after[t]) for t in PRESERVE_TABLES if before[t] != after[t]}
                 if moved:
-                    # A purge that touched preserved data is a bug, not a result
-                    # to be committed.
-                    raise RuntimeError(f"preserved tables changed, rolling back: {moved}")
+                    raise PurgeRefused(f"preserved tables changed, rolling back: {moved}")
             except Exception:
                 await session.rollback()
                 raise
@@ -466,8 +753,6 @@ async def main() -> int:
 
             final = await build_plan(session)
             render(final, applied=True)
-            print("\nNext: re-run trend evaluation and opportunity generation to")
-            print("recompute the mixed results from the surviving live evidence.\n")
             return 0
     finally:
         await engine.dispose()
