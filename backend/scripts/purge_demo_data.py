@@ -551,67 +551,104 @@ async def apply_purge(session: AsyncSession, demo_ids: list[str]) -> None:
 RECOMPUTE_PROCEDURE = """\
 RECOMPUTING MIXED RESULTS
 =========================
-A mixed trend is one that drew on both live and demo evidence. Its demo signals
-are gone, but its stored numbers were computed while they were present, so until
-it is re-evaluated it is displaying a score derived from evidence that no longer
-exists.
+A mixed trend drew on both live and demo evidence. Its demo signals are gone,
+but its stored numbers were computed while they were present, so until it is
+re-evaluated it shows a score derived from evidence that no longer exists.
 
-  1. Re-evaluate trends, which recomputes score, confidence, stage and state
-     from surviving evidence only:
+The commands below are for PowerShell. Each uses a here-string (@' ... '@) piped
+into `python -`, so nothing needs quoting or line-continuation escapes. The
+closing '@ must sit at the very start of its own line -- PowerShell requires it.
+Note the -T flag: without it docker compose will not forward stdin.
 
-       docker compose exec api python -c "
-       import asyncio
-       from app.db.session import session_scope
-       from app.services.trends import evaluate_trends
-       async def main():
-           async with session_scope() as s:
-               print(await evaluate_trends(s))
-       asyncio.run(main())"
+STEP 1 - clear the monotonic peaks BEFORE recomputing (required)
+-----------------------------------------------------------------
+`trends.peak_score` and `opportunities.peak_score` are MONOTONIC: the upsert
+paths only ever raise them, via `max(...)`. `next_state()` then compares the
+fresh score against the stored peak and returns "weakening" once the gap reaches
+the drop threshold (20 for trends, 18 for opportunities). A peak inflated by
+purged demo evidence therefore survives the purge and pushes a correctly-scored
+trend into a decline it never entered.
 
-  2. Regenerate opportunities from the re-evaluated trends:
+Reset to ZERO, not to `trend_score`. At reset time `trend_score` is *itself* the
+demo-contaminated number -- it is only overwritten later, during evaluation --
+so `peak_score = trend_score` just relocates the inflated value instead of
+clearing it, and still yields a spurious "weakening" whenever the contamination
+exceeds the threshold. Zero is unconditionally safe: the first evaluation
+immediately raises the peak to the newly computed score.
 
-       docker compose exec api python -c "
-       import asyncio
-       from app.db.session import session_scope
-       from app.services.opportunities import generate_opportunities
-       async def main():
-           async with session_scope() as s:
-               print(await generate_opportunities(s))
-       asyncio.run(main())"
+@'
+import asyncio, sqlalchemy as sa
+from app.db.session import SessionLocal
+async def main():
+    async with SessionLocal() as s:
+        t = await s.execute(sa.text('UPDATE trends SET peak_score = 0, peak_score_at = NULL'))
+        o = await s.execute(sa.text('UPDATE opportunities SET peak_score = 0'))
+        await s.commit()
+        print('trends reset:', t.rowcount, 'opportunities reset:', o.rowcount)
+asyncio.run(main())
+'@ | docker compose exec -T api python -
 
-HOW STALE VALUES ARE PREVENTED FROM INFLUENCING THE REBUILD
------------------------------------------------------------
-Most stored fields are overwritten unconditionally on re-evaluation, so they
-cannot contaminate anything. Three do not, and they are the reason this section
-exists rather than a bare "re-run the pipeline":
+This resets every row, which is the conservative and correct choice. A peak is a
+historical high-water mark carrying no record of which evidence produced it, so
+there is no reliable way to reset "only the contaminated ones". Zeroing all of
+them costs nothing -- each is re-established from live evidence on the next
+evaluation -- whereas missing one leaves a false decline on the board.
 
-* `trends.peak_score` / `peak_score_at` are MONOTONIC. `_upsert_trend` only ever
-  raises the peak (`if result.trend_score > trend.peak_score`), and `next_state`
-  compares the new score against it: a fall of WEAKENING_DROP points from peak
-  moves a trend to "weakening". A peak inflated by demo evidence therefore
-  survives the purge and can push a correctly-scored trend into a decline state
-  it never actually entered. Reset it for affected trends BEFORE step 1:
+STEP 2 - re-evaluate trends from surviving evidence
+----------------------------------------------------
+@'
+import asyncio
+from app.db.session import SessionLocal
+from app.services.trends import evaluate_trends
+async def main():
+    async with SessionLocal() as s:
+        trends = await evaluate_trends(s)
+        await s.commit()
+        print('trends evaluated:', len(trends))
+asyncio.run(main())
+'@ | docker compose exec -T api python -
 
-      UPDATE trends SET peak_score = trend_score, peak_score_at = last_evaluated_at
-      WHERE id IN (<mixed trend ids reported above>);
+STEP 3 - regenerate opportunities
+-----------------------------------
+@'
+import asyncio
+from app.db.session import SessionLocal
+from app.services.opportunities import generate_opportunities
+async def main():
+    async with SessionLocal() as s:
+        result = await generate_opportunities(s)
+        await s.commit()
+        print('created:', len(result.created), 'updated:', len(result.updated))
+asyncio.run(main())
+'@ | docker compose exec -T api python -
 
-  This script prints the count; it does not perform the reset, because it
-  rewrites analytical values rather than removing demo data and belongs to the
-  recomputation step, not the purge.
+There is no `app.db.session.session_scope` in this codebase. The session factory
+is `app.db.session.SessionLocal`, and it does NOT commit on exit -- only the
+FastAPI dependency `get_session` does. The explicit `await s.commit()` in each
+step is therefore required; without it the work silently rolls back.
 
-* `trend_snapshots` are immutable history, one row per evaluation. Snapshots
-  written while demo evidence was present are NOT deleted for surviving trends —
-  they record what the system genuinely reported at the time. They are inputs to
-  nothing: `_upsert_trend` never reads them back, so they cannot influence a
-  rebuild. The count of such rows is reported so the staleness is visible.
+WHAT CANNOT CONTAMINATE THE REBUILD
+------------------------------------
+* `trend_snapshots` and `opportunity_scores` are append-only history, one row per
+  evaluation. Rows written while demo evidence was present are NOT deleted for
+  surviving trends: they record what the system genuinely reported at the time.
+  Neither table is read back during evaluation, so they cannot influence a
+  rebuild. Their counts are reported above so the staleness is visible.
+* Every other stored field on a trend or opportunity is overwritten
+  unconditionally on re-evaluation.
 
-* `opportunity_scores` is likewise append-only history and is not read back
-  during generation.
+VERIFY
+-------
+docker compose exec -T postgres psql -U ois -d ois -c "SELECT count(*) AS dangling FROM trend_signals ts LEFT JOIN sources s ON s.id = ts.source_id WHERE s.id IS NULL;"
 
-After step 2, verify no surviving trend still claims demo evidence:
+Expect 0. Then confirm live evidence survived and no inflated peak remains:
 
-    SELECT count(*) FROM trend_signals ts
-      LEFT JOIN sources s ON s.id = ts.source_id WHERE s.id IS NULL;   -- expect 0
+docker compose exec -T postgres psql -U ois -d ois -c "SELECT s.slug, count(o.id) AS observations FROM sources s LEFT JOIN signals g ON g.source_id = s.id LEFT JOIN signal_observations o ON o.signal_id = g.id GROUP BY s.slug ORDER BY s.slug;"
+
+docker compose exec -T postgres psql -U ois -d ois -c "SELECT count(*) AS still_inflated FROM trends WHERE peak_score > trend_score;"
+
+The observation counts should still show your live sources (for example
+wikipedia and hackernews) at their pre-purge volumes.
 """
 
 

@@ -599,3 +599,40 @@ async def test_stale_peak_scores_and_snapshots_are_reported(session):
 
     assert plan.mixed_trends >= 1
     assert plan.stale_snapshots >= 1, "snapshots predating the purge are surfaced"
+
+
+async def test_recompute_procedure_matches_the_real_codebase():
+    """The printed rebuild steps must be runnable as written.
+
+    Two defects shipped earlier and are guarded here:
+      1. `peak_score = trend_score` did not clear the inflation, because at
+         reset time `trend_score` is itself the demo-contaminated value.
+      2. `app.db.session.session_scope` does not exist in this codebase.
+    """
+    import re
+
+    from app.db import session as session_module
+    from scripts.purge_demo_data import RECOMPUTE_PROCEDURE as text
+
+    # 1. The peak reset must zero the peak, never seed it from trend_score.
+    assert "UPDATE trends SET peak_score = 0" in text
+    assert "UPDATE opportunities SET peak_score = 0" in text, (
+        "opportunities.peak_score is monotonic too and must be reset as well"
+    )
+    assert "SET peak_score = trend_score" not in text
+
+    # 2. Only symbols that actually exist may be imported.
+    assert not hasattr(session_module, "session_scope")
+    assert "from app.db.session import SessionLocal" in text
+    assert "async with SessionLocal() as s" in text
+
+    # SessionLocal does not commit on exit, so each step must commit.
+    blocks = re.findall(r"@'\n(.*?)\n'@ \| docker compose exec -T api python -", text, re.S)
+    assert len(blocks) == 3, "expected the three rebuild steps"
+    for block in blocks:
+        compile(block, "<rebuild step>", "exec")  # must be valid Python
+        assert "await s.commit()" in block
+
+    # PowerShell here-strings require the terminator at column 0, and docker
+    # compose needs -T to forward stdin.
+    assert "\n'@ | docker compose exec -T api python -" in text
