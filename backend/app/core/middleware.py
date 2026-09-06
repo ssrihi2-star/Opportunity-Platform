@@ -52,10 +52,29 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
         return response
 
 
+def _liveness_paths() -> frozenset[str]:
+    """Exact paths a container orchestrator probes, which must never be limited.
+
+    Exact matches only: `/sources/{id}/health` is a normal authenticated
+    endpoint and stays rate limited.
+    """
+    prefix = settings.API_V1_PREFIX.rstrip("/")
+    return frozenset({f"{prefix}/health", f"{prefix}/health/ready"})
+
+
+HEALTH_PATHS = _liveness_paths()
+
+
 class RateLimitMiddleware(BaseHTTPMiddleware):
     """Coarse per-IP limit. Endpoint-specific limits live in the routers."""
 
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
+        # Docker probes the health endpoint from the container gateway address,
+        # so every probe shares one bucket with any other traffic from that IP.
+        # A liveness probe that can report "unhealthy" because it was polled too
+        # often reports on the limiter, not on the service.
+        if request.url.path.rstrip("/") in HEALTH_PATHS:
+            return await call_next(request)
         if request.url.path.startswith("/api/"):
             client_ip = request.client.host if request.client else "unknown"
             limiter = get_limiter()

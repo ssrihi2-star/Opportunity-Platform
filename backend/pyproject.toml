@@ -36,6 +36,9 @@ dev = [
   "mypy>=1.10",
   "pre-commit>=3.7",
   "pip-audit>=2.7",
+  # tests/test_healthcheck_probes.py parses docker-compose.yml; do not rely on
+  # PyYAML arriving transitively via pre-commit.
+  "pyyaml>=6.0",
 ]
 vector = ["pgvector>=0.2.5"]
 
