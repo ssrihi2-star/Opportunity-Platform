@@ -100,7 +100,17 @@ def changepoint(values: list[float], min_segment: int = 5) -> int | None:
     return best_idx if best_stat >= 3.0 else None
 
 
-def analyse_series(values: list[float], *, window: int = 7, z_threshold: float = 2.5) -> SeriesStats:
+def analyse_series(values: list[float | None], *, window: int = 7, z_threshold: float = 2.5) -> SeriesStats:
+    # Missing observations are not zero, and dropping them would compress time.
+    # Keep the series unranked until its measurements are complete.
+    if any(value is None for value in values):
+        return SeriesStats(
+            n=len(values),
+            pct_change_last=None, pct_change_window=None, moving_average=None,
+            zscore_last=None, ewma_last=None, acceleration=None,
+            changepoint_index=None, is_anomaly=False, direction="unknown",
+            strength=0.0, note="Missing observations: statistics cannot be concluded.",
+        )
     n = len(values)
     if n == 0:
         return SeriesStats(

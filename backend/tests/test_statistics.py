@@ -76,3 +76,15 @@ def test_analyse_series_reports_insufficient_history_instead_of_guessing():
 def test_analyse_series_is_deterministic():
     values = [float(i) ** 1.2 for i in range(1, 60)]
     assert analyse_series(values) == analyse_series(values)
+
+
+@pytest.mark.parametrize("values", [[None, 2.0, 3.0], [1.0, None, 3.0], [1.0, 2.0, None], [None, None, None]])
+def test_missing_observations_are_unknown_not_zero(values):
+    original = list(values)
+    stats = analyse_series(values)
+    assert stats.direction == "unknown"
+    assert stats.pct_change_window is None
+    assert stats.ewma_last is None
+    assert stats.is_anomaly is False
+    assert "Missing observations" in stats.note
+    assert values == original
