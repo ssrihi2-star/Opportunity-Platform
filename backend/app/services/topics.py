@@ -284,14 +284,20 @@ async def rebuild_topics(session: AsyncSession, *, now: datetime | None = None) 
             topic.last_seen_at = now
 
         existing = {
-            str(row.entity_id)
+            str(row.entity_id): row
             for row in (await session.execute(sa.select(TopicEntity).where(TopicEntity.topic_id == topic.id)))
             .scalars()
             .all()
         }
+        # Add new automatic members from the cluster
         for entity_id in cluster.entity_ids:
             if entity_id not in existing:
                 session.add(TopicEntity(topic_id=topic.id, entity_id=by_entity[entity_id].id, weight=1.0))
+        # Remove automatic members that are no longer in the cluster, but preserve manual memberships
+        cluster_entity_ids = set(cluster.entity_ids)
+        for entity_id_str, te in existing.items():
+            if entity_id_str not in cluster_entity_ids and not te.is_manual:
+                await session.delete(te)
         result.append(topic)
 
     await session.flush()

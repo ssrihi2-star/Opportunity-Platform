@@ -10,6 +10,7 @@ export const messages = {
       sources: "Sources",
       settings: "Settings",
       trends: "Trends",
+      topics: "Topics",
       review: "Entity review",
       opportunities: "Opportunities",
       forYou: "For you",
@@ -506,6 +507,9 @@ export const messages = {
         industry: "Industry",
         keyword: "Keyword",
       },
+    },
+    topics: {
+      title: "Topics",
     },
     review: {
       title: "Entity review",
