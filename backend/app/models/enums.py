@@ -444,3 +444,21 @@ class LiveValidationState(StrEnum):
     NOT_VERIFIED = "not_verified"
     VERIFIED = "verified"
     FAILED = "failed"
+
+
+class AnalysisMode(StrEnum):
+    """Which evidence an evaluation was allowed to read.
+
+    Not a display filter. A trend or opportunity carries the mode it was
+    *computed* under, because a score produced from demo and live evidence
+    together is a different number from one produced from live evidence alone,
+    and showing the first under a live-only heading would be a lie. The two live
+    side by side; neither overwrites the other.
+    """
+
+    #: Everything stored: live sources, offline generators, demo scenarios, and
+    #: the seeded manual CSV. This is what the platform has always done.
+    DEMO_INCLUSIVE = "demo_inclusive"
+    #: Only evidence from sources that actually contact a live upstream. See
+    #: `app.sources.provenance` for the exact rule and why it is the adapter.
+    LIVE_ONLY = "live_only"

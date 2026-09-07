@@ -23,7 +23,7 @@ from app.ai.prompts import ALL_PROMPTS
 from app.core.config import settings
 from app.core.security import hash_password
 from app.db.session import SessionLocal
-from app.models.enums import Role, ValidationStatus
+from app.models.enums import AnalysisMode, Role, ValidationStatus
 from app.models.models import Alert, PromptVersion, Source, User, UserPreference, Watchlist
 from app.services.entities import resolve_entity
 from app.services.ingestion import run_source
@@ -431,7 +431,11 @@ async def seed() -> None:
         # --- Phase 3: cluster topics and evaluate trends --------------------
         topics = await rebuild_topics(session)
         await session.commit()
-        trends = await evaluate_trends(session)
+        # Seeded evidence is demo evidence, so the seed only ever writes the
+        # demo-inclusive evaluation. A live-only set appears when a live source
+        # has actually collected something; inventing one here from demo data is
+        # precisely the confusion this mode exists to remove.
+        trends = await evaluate_trends(session, analysis_mode=AnalysisMode.DEMO_INCLUSIVE)
         await session.commit()
         print(f"clustered {len(topics)} topic(s); evaluated {len(trends)} trend(s)")
         for trend in sorted(trends, key=lambda t: -t.trend_score)[:10]:
@@ -444,7 +448,10 @@ async def seed() -> None:
         # DEMO, not LIVE_VALIDATED: every number underneath comes from generated
         # scenarios, and the UI says so on every card.
         result = await generate_opportunities(
-            session, contexts=SCENARIO_CONTEXT, validation_status=ValidationStatus.DEMO
+            session,
+            contexts=SCENARIO_CONTEXT,
+            validation_status=ValidationStatus.DEMO,
+            analysis_mode=AnalysisMode.DEMO_INCLUSIVE,
         )
         await session.commit()
         print(

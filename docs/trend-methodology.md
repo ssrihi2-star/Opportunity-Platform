@@ -240,3 +240,137 @@ for a raw subtotal of 57. It then takes tiny baseline (−15), one-day spike (�
 low-quality sources (−10) and duplicate information (−12): 62 points of penalty, capped
 at 60, giving **0**. Confidence stays at 70, because the data itself is complete — we are
 confident that this is not a trend.
+
+---
+
+## 12. Live-only vs demo-inclusive analysis
+
+Real Hacker News and Wikipedia collection now works, but its observations land in
+exactly the same tables as the demo scenarios, the offline generator and the
+seeded manual CSV. Read together they produced trends like **Pump Heat** with a
+confidence of 93 over a mixture, and there was no way to ask what the *live*
+evidence alone supported.
+
+Every evaluation therefore carries an **analysis mode**, stored on the row:
+
+| Mode | Reads |
+|---|---|
+| `demo_inclusive` | everything stored — live sources, generators, demo scenarios, the seeded CSV. The historical behaviour, and still the default. |
+| `live_only` | only evidence from sources that actually contact a live upstream. |
+
+### The eligibility rule is the adapter, not the source class
+
+`Source.source_class` is a **trust** label (how much a kind of publisher is
+believed), not a **provenance** label. Two cases in this repository prove it
+cannot decide this on its own:
+
+* `manual_csv` is seeded with `source_class = "manual_import"`. Nothing in that
+  string says "demo", yet its rows are a hard-coded fixture in `scripts/seed.py`.
+* `wikipedia_pageviews` declares `source_class = "official"`. That is a statement
+  about Wikimedia, not proof that any given row was ever fetched.
+
+So `app/sources/provenance.py` decides on `BaseDataSource.requires_network`: an
+adapter that never opens a socket cannot have produced live evidence, whatever it
+is labelled. The `demo` class and the `scenario` / `demo_mock` adapters are
+refused by name as well, and an unregistered adapter fails **closed** — an
+unknown provenance is not a live provenance.
+
+**Seeded `manual_csv` is excluded from live-only mode** for this MVP. Support for
+verified user-imported evidence is deferred; until it exists an uploaded CSV
+cannot be told apart from the seeded one.
+
+### The exclusion happens before anything is measured
+
+In `live_only`, ineligible series are dropped in `_load_series`, before growth,
+corroboration counting, confidence, duplication or the opportunity engine sees
+them. Filtering only the displayed source list would leave every number computed
+from the mix. Live-only generation additionally refuses the hand-written
+`SCENARIO_CONTEXT` analyzer facts, which are themselves demo evidence.
+
+### The two results are separate rows, and neither overwrites the other
+
+`analysis_mode` is part of a trend's identity (`ux_trend_subject_mode`). A
+live-only evaluation of "heat pump" therefore creates its own row rather than
+updating the mixed one in place, so a mixed score, its snapshot history and its
+peak can never be relabelled as live. An existing mixed result is never presented
+as a live-only result, and migration `0008` backfills every pre-existing row to
+`demo_inclusive` — the literal truth about how it was produced.
+
+**Scoring formulas are unchanged.** Scores and confidence do move when demo
+evidence is excluded, and that is the point: confidence measures evidence
+quality, so it may go up or down. Nothing compensates to preserve the old number.
+
+### Insufficient live evidence is stated, not filled in
+
+When live-only produces nothing, the API says so — `evaluated: 0` with an
+explanation, and `insufficient_live_evidence: true` on generation. An empty
+result reads as "nothing is happening"; the wording says "we could not look".
+No demo evidence is ever substituted to close the gap.
+
+### Finding: why "Pump Heat" groups solar water pumps with heat pumps
+
+**This grouping is supported by the existing topic-matching rules.** Section 2
+above specifies union-find over shared distinctive tokens, and that is exactly
+what happened:
+
+* `heat pump` and `heat pump water heater` share `heat` and `pump`;
+* `heat pump water heater` and `solar water pumps` share `water`;
+* union-find merges the transitive closure into one component, labelled from the
+  shared tokens — hence "Pump Heat".
+
+It is not caused by co-occurrence: the co-occurrence bridge may only reinforce a
+relationship the names already imply, and removing it changes nothing. Dropping
+`heat pump water heater` separates the two devices, because `heat pump` and
+`solar water pumps` share no distinctive token at all.
+
+So this is a limitation of name-token overlap, not a defect in the
+implementation. A solar water pump and a heat pump are unrelated devices that
+happen to share ordinary English words. Distinguishing them needs entity
+resolution on identifiers, which section 1 already describes and which is
+deliberately **not** attempted here. The behaviour is pinned by characterisation
+tests in `tests/test_topics.py` so any future change to it is a visible diff.
+
+### Which surfaces choose their mode, and which are pinned
+
+The two modes are not offered everywhere, because not every surface has a reader
+who can choose.
+
+**Trends and Opportunities are explicit.** They carry the mode selector, they
+default to demo-inclusive, and every figure on them is labelled with the mode it
+came from. Demo evidence remains fully reachable there; nothing was hidden.
+
+**The personal feed, scheduled alerts and scheduled digests are pinned to
+`live_only`.** These arrive unbidden — often as a Telegram message read on a
+phone — with no dropdown beside them saying what the number was computed from. A
+demo-backed candidate is least defensible exactly there, so it never enters. The
+value lives in one place, `services/surfaces.DEFAULT_SURFACE_MODE`, because the
+realistic failure is one surface quietly keeping the old default after the others
+move.
+
+This is deliberately **not** a per-user preference. A preference would let the
+same underlying fact alert somebody once per mode: the alert dedupe key is built
+from the event, not from the mode, so the same change would legitimately reach a
+person twice. One mode for the push surfaces makes that impossible.
+
+**Filtering is applied on read as well as on write.** `monitor_all` no longer
+creates change events for demo candidates, but events and deliveries recorded
+before this rule existed are still stored, and they stay stored — deleting
+history to implement a display rule would destroy the record of what the system
+actually said. Digests are assembled from history, so both halves of that
+assembly (the change events and the previously recorded deliveries) filter by
+the mode of the opportunity each row points at. An `AlertDelivery` has no mode of
+its own; a delivery with no opportunity at all, such as a rule-level or system
+notice, is kept, because it is not a demo result.
+
+**An empty live-only result is presented as empty.** No fallback, no top-up. If
+the live sources support nothing today, the feed says so and the digest says so.
+Substituting demo rows to make the page look populated would convert an honest
+silence into a false claim, which is the precise failure this whole distinction
+exists to prevent.
+
+The label reflects the same honesty. "Live only" is a statement about what was
+*excluded*, not a quality guarantee, so the UI describes it as *"Excludes demo
+and manual-import sources; freshness and accuracy are not verified."* Candidates
+built this way remain `validation_status = unvalidated`: the evidence being live
+says nothing about whether the adapters have been proven, and both statements are
+true at once.

@@ -43,6 +43,12 @@ services:
       - "8000:8000"
     volumes:
       - ./backend:/srv
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/api/v1/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      retries: 5
 
   worker:
     build: ./backend
@@ -56,6 +62,17 @@ services:
     command: ["celery", "-A", "app.workers.celery_app.celery_app", "worker", "-Q", "ingest,analyze,ai", "-l", "info"]
     volumes:
       - ./backend:/srv
+    # Ask this container's own worker node to reply. Unscoped `inspect ping`
+    # would pass whenever ANY worker on the broker answers, so a dead worker
+    # here would still look healthy.
+    healthcheck:
+      # $$(hostname) not $$HOSTNAME: CMD-SHELL runs under dash, which does not
+      # export HOSTNAME, so the node name would come out empty and never match.
+      test: ["CMD-SHELL", "celery -A app.workers.celery_app.celery_app inspect ping -d celery@$$(hostname) -t 10 > /dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 15s
+      start_period: 60s
+      retries: 5
 
   beat:
     build: ./backend
@@ -65,9 +82,20 @@ services:
       REDIS_URL: redis://redis:6379/0
     depends_on:
       redis: {condition: service_healthy}
-    command: ["celery", "-A", "app.workers.celery_app.celery_app", "beat", "-l", "info"]
+    # Beat answers no pings and, with only nightly entries due, can go hours
+    # without rewriting its schedule file — so neither an `inspect ping` nor a
+    # file-freshness check works here. Writing a pidfile and signal-testing it
+    # is the one signal that tracks the process itself. Celery clears a stale
+    # pidfile on restart, so a crash is reported until beat is actually back.
+    command: ["celery", "-A", "app.workers.celery_app.celery_app", "beat", "-l", "info", "--pidfile", "/tmp/celerybeat.pid"]
     volumes:
       - ./backend:/srv
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import os,sys; os.kill(int(open('/tmp/celerybeat.pid').read().strip()), 0)\" || exit 1"]
+      interval: 30s
+      timeout: 10s
+      start_period: 30s
+      retries: 3
 
   web:
     build:

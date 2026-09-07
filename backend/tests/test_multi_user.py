@@ -20,6 +20,7 @@ import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.enums import AnalysisMode
 from app.models.models import Opportunity, OpportunityParticipation, Trend
 
 pytestmark = pytest.mark.asyncio
@@ -37,11 +38,18 @@ async def make_opportunity(
     risk: str = "moderate",
     capital: float | None = 20_000.0,
     paths: tuple[str, ...] = ("build", "provide_service", "watch"),
+    analysis_mode: str = AnalysisMode.LIVE_ONLY,
 ) -> Opportunity:
     """A stored global opportunity, created directly.
 
     The full pipeline is exercised elsewhere; these tests are about what happens
     to two different people looking at the same stored row.
+
+    `analysis_mode` defaults to live-only because the surfaces most of these
+    tests drive — the personal feed, alerts, digests — read live-only rows. A
+    demo-inclusive default would make every one of them assert on an empty page
+    and quietly stop testing relevance at all. Tests that are specifically about
+    the mode boundary pass `demo_inclusive` explicitly.
     """
     now = datetime.now(UTC)
     trend = Trend(
@@ -70,6 +78,7 @@ async def make_opportunity(
         country=country,
         state="candidate",
         validation_status="demo",
+        analysis_mode=analysis_mode,
         maturity_stage="early_adoption",
         risk_level=risk,
         opportunity_score=score,

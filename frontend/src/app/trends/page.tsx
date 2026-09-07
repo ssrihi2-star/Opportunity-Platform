@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { Guard } from "@/components/Guard";
-import { Card, ScoreBar, StatusBadge, vocab } from "@/components/ui";
+import { AnalysisModeBadge, AnalysisModeSelect, Card, ScoreBar, StatusBadge, vocab } from "@/components/ui";
 import { api } from "@/lib/api";
 import { useApp } from "@/lib/providers";
 import type { Page, Trend } from "@/lib/types";
@@ -35,6 +35,9 @@ function Body() {
   const [message, setMessage] = useState<string | null>(null);
 
   const [sort, setSort] = useState("score");
+  // Which evidence the listed evaluations were computed from. Not a filter over
+  // an already-computed list: each mode is a separate set of stored trends.
+  const [mode, setMode] = useState("demo_inclusive");
   const [category, setCategory] = useState("");
   const [stage, setStage] = useState("");
   const [geo, setGeo] = useState("");
@@ -44,7 +47,7 @@ function Body() {
 
   const load = useCallback(() => {
     if (!token) return;
-    const params = new URLSearchParams({ sort, limit: "200" });
+    const params = new URLSearchParams({ sort, limit: "200", analysis_mode: mode });
     if (category) params.set("category", category);
     if (stage) params.set("stage", stage);
     if (geo) params.set("geo_scope", geo);
@@ -54,7 +57,7 @@ function Body() {
     api<Page<Trend>>(`/trends?${params}`, { token })
       .then(setData)
       .catch((e) => setError(e.message));
-  }, [token, sort, category, stage, geo, subject, hideSpikes, hideSeasonal]);
+  }, [token, sort, mode, category, stage, geo, subject, hideSpikes, hideSeasonal]);
 
   useEffect(load, [load]);
 
@@ -62,7 +65,10 @@ function Body() {
     setBusy(true);
     setMessage(null);
     try {
-      const res = await api<{ detail: string }>("/trends/evaluate", { method: "POST", token });
+      const res = await api<{ detail: string }>(
+        `/trends/evaluate?analysis_mode=${mode}`,
+        { method: "POST", token },
+      );
       setMessage(res.detail);
       load();
     } catch (e) {
@@ -90,6 +96,7 @@ function Body() {
       {message && <p className="text-sm text-[var(--text-secondary)]">{message}</p>}
 
       <div className="flex flex-wrap gap-3 items-end text-sm">
+        <AnalysisModeSelect value={mode} onChange={setMode} />
         <label className="text-xs">
           {t.trends.sortBy}
           <select value={sort} onChange={(e) => setSort(e.target.value)} className="field mt-1 block text-sm">
@@ -150,7 +157,11 @@ function Body() {
         </label>
       </div>
 
-      <Card note={t.trends.notAdvice}>
+      <p className="text-xs text-[var(--text-muted)] max-w-3xl">
+        {mode === "live_only" ? t.analysis.liveOnlyHint : t.analysis.demoInclusiveHint}
+      </p>
+
+      <Card note={t.trends.notAdvice} actions={<AnalysisModeBadge mode={mode} />}>
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead className="text-xs text-[var(--text-muted)]">
@@ -206,7 +217,7 @@ function Body() {
               {(data?.items ?? []).length === 0 && (
                 <tr>
                   <td colSpan={9} className="py-3 text-[var(--text-muted)]">
-                    {t.trends.empty}
+                    {mode === "live_only" ? t.analysis.noLiveTrends : t.trends.empty}
                   </td>
                 </tr>
               )}

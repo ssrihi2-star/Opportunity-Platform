@@ -13,7 +13,7 @@ from app.analytics.opportunity_config import OPPORTUNITY_VERSION
 from app.analytics.relevance import RelevanceResult
 from app.analytics.signal_types import class_of
 from app.api.deps import current_user, db_session, require_admin, require_analyst
-from app.models.enums import ValidationStatus
+from app.models.enums import AnalysisMode, ValidationStatus
 from app.models.models import (
     ModelRun,
     Opportunity,
@@ -129,6 +129,15 @@ async def list_opportunities(
     state: str | None = None,
     risk_level: str | None = None,
     validation_status: str | None = None,
+    analysis_mode: str = Query(
+        default=AnalysisMode.DEMO_INCLUSIVE,
+        pattern="^(demo_inclusive|live_only)$",
+        description=(
+            "Which evidence the returned candidates were generated from. "
+            "'live_only' returns candidates whose whole evidence chain is live; "
+            "'demo_inclusive' returns the mixed-source candidates."
+        ),
+    ),
     min_score: float | None = Query(default=None, ge=0, le=100),
     min_confidence: float | None = Query(default=None, ge=0, le=100),
     min_relevance: float | None = Query(default=None, ge=0, le=100),
@@ -145,7 +154,7 @@ async def list_opportunities(
     because relevance is not stored on the global row and must never be.
     """
     stmt = sa.select(Opportunity).outerjoin(Trend, Trend.id == Opportunity.primary_trend_id)
-    filters = []
+    filters = [Opportunity.analysis_mode == analysis_mode]
     if opportunity_type:
         filters.append(Opportunity.opportunity_type == opportunity_type)
     if country:
@@ -421,12 +430,29 @@ async def opportunity_report(
 
 @router.post("/opportunities/generate", response_model=GenerateResult)
 async def run_generation(
+    analysis_mode: str = Query(
+        default=AnalysisMode.DEMO_INCLUSIVE,
+        pattern="^(demo_inclusive|live_only)$",
+        description=(
+            "Which evidence the generator may read. 'live_only' reads only trends "
+            "that were themselves evaluated from live sources, and refuses the "
+            "hand-written demo scenario contexts."
+        ),
+    ),
     session: AsyncSession = Depends(db_session),
     user: User = Depends(require_admin),
 ) -> GenerateResult:
     """Re-run the whole pipeline. Updates existing candidates; never duplicates them."""
+    live_only = analysis_mode == AnalysisMode.LIVE_ONLY
+    # A live-only candidate is not DEMO, but the adapters behind it have not been
+    # through the live-validation gate either, so it is UNVALIDATED — the honest
+    # middle label that already exists for exactly this case.
+    validation_status = ValidationStatus.UNVALIDATED if live_only else ValidationStatus.DEMO
     result = await generate_opportunities(
-        session, contexts=SCENARIO_CONTEXT, validation_status=ValidationStatus.DEMO
+        session,
+        contexts=None if live_only else SCENARIO_CONTEXT,
+        validation_status=validation_status,
+        analysis_mode=analysis_mode,
     )
     session.add(
         SystemAuditLog(
@@ -439,16 +465,27 @@ async def run_generation(
                 "updated": len(result.updated),
                 "rejected": len(result.rejections),
                 "version": OPPORTUNITY_VERSION,
+                "analysis_mode": analysis_mode,
             },
         )
     )
     await session.commit()
+    insufficient = live_only and result.total == 0
     return GenerateResult(
         created=len(result.created),
         updated=len(result.updated),
         rejected=len(result.rejections),
         algorithm_version=OPPORTUNITY_VERSION,
-        validation_status=ValidationStatus.DEMO,
+        validation_status=validation_status,
+        analysis_mode=analysis_mode,
+        insufficient_live_evidence=insufficient,
+        detail=(
+            "No live-only candidates could be produced: there is not enough eligible "
+            "live evidence yet. Nothing was substituted from the demo scenarios. Run a "
+            "live source, re-evaluate trends in live-only mode, then generate again."
+            if insufficient
+            else None
+        ),
         rejections=[
             RejectionOut(
                 trend_id=r.trend_id,

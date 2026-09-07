@@ -79,6 +79,62 @@ const STATUS_STYLE: Record<string, { color: string; icon: string }> = {
 };
 
 /**
+ * Which evidence the numbers on this row were COMPUTED FROM.
+ *
+ * Deliberately not the same statement as ValidationBadge below. That badge says
+ * how far the adapters have been proven; this one says what the engine was
+ * allowed to read. A live-only candidate on adapters that have never passed the
+ * live gate carries LIVE ONLY and UNVALIDATED at the same time, and both are true.
+ */
+export function AnalysisModeBadge({ mode }: { mode: string }) {
+  const { t } = useApp();
+  const live = mode === "live_only";
+  return (
+    <span
+      className="rounded px-1.5 py-0.5 text-[10px] font-semibold tracking-wide"
+      style={{
+        background: live ? "var(--status-good)" : "var(--text-muted)",
+        color: "#fff",
+      }}
+      title={live ? t.analysis.liveOnlyHint : t.analysis.demoInclusiveHint}
+    >
+      {live ? t.analysis.liveBadge : t.analysis.demoBadge}
+    </span>
+  );
+}
+
+/**
+ * The Live-only / Demo-inclusive selector.
+ *
+ * One component so both pages offer the identical choice with the identical
+ * wording. Selecting a mode does not filter a list that was already computed —
+ * it asks for the evaluations that were computed under that mode.
+ */
+export function AnalysisModeSelect({
+  value,
+  onChange,
+}: {
+  value: string;
+  onChange: (mode: string) => void;
+}) {
+  const { t } = useApp();
+  return (
+    <label className="text-xs">
+      {t.analysis.label}
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className="field mt-1 block text-sm"
+        title={value === "live_only" ? t.analysis.liveOnlyHint : t.analysis.demoInclusiveHint}
+      >
+        <option value="demo_inclusive">{t.analysis.demoInclusive}</option>
+        <option value="live_only">{t.analysis.liveOnly}</option>
+      </select>
+    </label>
+  );
+}
+
+/**
  * Where the evidence behind a candidate came from.
  *
  * Shared rather than copied: this badge is how the product tells someone their

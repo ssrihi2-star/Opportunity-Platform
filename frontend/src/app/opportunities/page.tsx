@@ -3,7 +3,15 @@
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { Guard } from "@/components/Guard";
-import { Card, ScoreBar, StatusBadge, ValidationBadge, vocab } from "@/components/ui";
+import {
+  AnalysisModeBadge,
+  AnalysisModeSelect,
+  Card,
+  ScoreBar,
+  StatusBadge,
+  ValidationBadge,
+  vocab,
+} from "@/components/ui";
 import { api } from "@/lib/api";
 import { useApp } from "@/lib/providers";
 import type { GenerateResult, Opportunity, Page } from "@/lib/types";
@@ -39,6 +47,9 @@ function Body() {
   const [result, setResult] = useState<GenerateResult | null>(null);
 
   const [sort, setSort] = useState("score");
+  // Which evidence the listed candidates were generated from. Each mode is its
+  // own set of stored candidates, not a view over one shared set.
+  const [mode, setMode] = useState("demo_inclusive");
   const [type, setType] = useState("");
   const [country, setCountry] = useState("");
   const [risk, setRisk] = useState("");
@@ -46,7 +57,7 @@ function Body() {
 
   const load = useCallback(() => {
     if (!token) return;
-    const params = new URLSearchParams({ sort, limit: "200" });
+    const params = new URLSearchParams({ sort, limit: "200", analysis_mode: mode });
     if (type) params.set("opportunity_type", type);
     if (country) params.set("country", country);
     if (risk) params.set("risk_level", risk);
@@ -54,14 +65,17 @@ function Body() {
     api<Page<Opportunity>>(`/opportunities?${params}`, { token })
       .then(setData)
       .catch((e) => setError(e.message));
-  }, [token, sort, type, country, risk, state]);
+  }, [token, sort, mode, type, country, risk, state]);
 
   useEffect(load, [load]);
 
   async function regenerate() {
     setBusy(true);
     try {
-      const res = await api<GenerateResult>("/opportunities/generate", { method: "POST", token });
+      const res = await api<GenerateResult>(
+        `/opportunities/generate?analysis_mode=${mode}`,
+        { method: "POST", token },
+      );
       setResult(res);
       load();
     } catch (e) {
@@ -94,6 +108,7 @@ function Body() {
       </div>
 
       <div className="flex flex-wrap items-end gap-3 text-sm">
+        <AnalysisModeSelect value={mode} onChange={setMode} />
         <label className="text-xs">
           {t.opportunities.sortBy}
           <select
@@ -171,10 +186,24 @@ function Body() {
         </label>
       </div>
 
-      <Card>
+      {result?.insufficient_live_evidence && (
+        <Card>
+          <h2 className="text-sm font-semibold">{t.analysis.insufficient}</h2>
+          <p className="mt-1 text-sm text-[var(--text-secondary)]">
+            {result.detail ?? t.analysis.noLiveOpportunities}
+          </p>
+        </Card>
+      )}
+
+      <Card actions={<AnalysisModeBadge mode={mode} />}>
+        <p className="mb-1 text-xs text-[var(--text-muted)]">
+          {mode === "live_only" ? t.analysis.liveOnlyHint : t.analysis.demoInclusiveHint}
+        </p>
         <p className="mb-3 text-xs text-[var(--text-secondary)]">{t.opportunities.notAdvice}</p>
         {items.length === 0 ? (
-          <p className="py-6 text-sm text-[var(--text-secondary)]">{t.opportunities.empty}</p>
+          <p className="py-6 text-sm text-[var(--text-secondary)]">
+            {mode === "live_only" ? t.analysis.noLiveOpportunities : t.opportunities.empty}
+          </p>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
@@ -200,6 +229,7 @@ function Body() {
                         {row.title}
                       </Link>
                       <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                        <AnalysisModeBadge mode={row.analysis_mode} />
                         <ValidationBadge status={row.validation_status} />
                         {row.trend_name && (
                           <span className="text-[11px] text-[var(--text-muted)]">

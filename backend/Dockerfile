@@ -19,7 +19,9 @@ RUN useradd --create-home --uid 10001 appuser && chown -R appuser:appuser /srv
 USER appuser
 
 EXPOSE 8000
-HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=5 \
-    CMD curl -fsS http://localhost:8000/api/v1/health || exit 1
+# The worker and beat services build from this same image but run no HTTP
+# server, so an image-level HTTP probe would mark them unhealthy forever.
+# Each service declares its own healthcheck in docker-compose.yml instead.
+HEALTHCHECK NONE
 
 CMD ["./entrypoint.sh"]

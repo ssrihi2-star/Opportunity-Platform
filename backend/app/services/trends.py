@@ -29,7 +29,7 @@ from app.analytics.trend_scoring import (
 )
 from app.core.logging import get_logger
 from app.db.base import as_utc
-from app.models.enums import ObservationStatus, SubjectType, TrendState
+from app.models.enums import AnalysisMode, ObservationStatus, SubjectType, TrendState
 from app.models.models import (
     Entity,
     RawRecord,
@@ -42,11 +42,29 @@ from app.models.models import (
     TrendSignal,
     TrendSnapshot,
 )
+from app.sources.provenance import live_eligibility
 
 log = get_logger("trends")
 
 #: A series with fewer points than this cannot say anything about a trend.
 MIN_OBSERVATIONS = 4
+
+#: A live-only trend needs at least this many eligible series before it is worth
+#: evaluating at all. Below it there is nothing to aggregate, and the honest
+#: answer is "not enough live evidence", not a score computed from one series and
+#: quietly topped up from the demo scenarios.
+MIN_LIVE_SERIES = 1
+
+
+@dataclass(slots=True)
+class ExcludedSource:
+    """A source whose evidence live-only mode refused, and the reason."""
+
+    slug: str
+    adapter_key: str
+    source_class: str
+    reason: str
+    signal_count: int = 0
 
 
 @dataclass(slots=True)
@@ -65,8 +83,17 @@ class SeriesBundle:
         return self.source.reliability * (0.6 if self.signal.is_proxy else 1.0)
 
 
-async def _load_series(session: AsyncSession) -> dict[str, list[SeriesBundle]]:
-    """Every signal with enough observations, grouped by entity id."""
+async def _load_series(
+    session: AsyncSession, *, analysis_mode: str = AnalysisMode.DEMO_INCLUSIVE
+) -> tuple[dict[str, list[SeriesBundle]], list[ExcludedSource]]:
+    """Every signal with enough observations, grouped by entity id.
+
+    In `live_only` mode the demo, generator and manually-imported series are
+    dropped **here**, before any measurement is taken, so nothing downstream —
+    growth, corroboration counting, confidence, duplication, or the opportunity
+    engine that reads the resulting trend_signals — can see them. Filtering only
+    the displayed source list would leave every number computed from the mix.
+    """
     rows = (
         await session.execute(
             sa.select(Signal, Source, Entity)
@@ -74,6 +101,26 @@ async def _load_series(session: AsyncSession) -> dict[str, list[SeriesBundle]]:
             .join(Entity, Entity.id == Signal.entity_id)
         )
     ).all()
+
+    excluded: dict[str, ExcludedSource] = {}
+    if analysis_mode == AnalysisMode.LIVE_ONLY:
+        kept = []
+        for signal, source, entity in rows:
+            eligible, reason = live_eligibility(source.adapter_key, source.source_class)
+            if eligible:
+                kept.append((signal, source, entity))
+                continue
+            record = excluded.setdefault(
+                source.slug,
+                ExcludedSource(
+                    slug=source.slug,
+                    adapter_key=source.adapter_key,
+                    source_class=source.source_class,
+                    reason=reason,
+                ),
+            )
+            record.signal_count += 1
+        rows = kept
 
     observations = (
         await session.execute(
@@ -106,7 +153,7 @@ async def _load_series(session: AsyncSession) -> dict[str, list[SeriesBundle]]:
                 points=points,
             )
         )
-    return bundles
+    return bundles, sorted(excluded.values(), key=lambda e: e.slug)
 
 
 async def _headlines(
@@ -272,9 +319,14 @@ async def _upsert_trend(
     result: TrendScore,
     bundles: list[SeriesBundle],
     extra_warnings: list[str],
+    analysis_mode: str,
     now: datetime,
 ) -> Trend:
-    where = [Trend.subject_type == subject_type, Trend.geo_scope == geo_scope]
+    where = [
+        Trend.subject_type == subject_type,
+        Trend.geo_scope == geo_scope,
+        Trend.analysis_mode == analysis_mode,
+    ]
     where.append(Trend.entity_id == (entity.id if entity else None))
     where.append(Trend.topic_id == (topic.id if topic else None))
     trend = (await session.execute(sa.select(Trend).where(*where))).scalar_one_or_none()
@@ -283,6 +335,7 @@ async def _upsert_trend(
     metrics = {
         **asdict(inp),
         "representative_signal": bundles[0].signal.signal_type if bundles else None,
+        "analysis_mode": analysis_mode,
     }
 
     if trend is None:
@@ -293,6 +346,7 @@ async def _upsert_trend(
             name=name,
             category=category,
             geo_scope=geo_scope,
+            analysis_mode=analysis_mode,
             first_detected_at=now,
             last_evaluated_at=now,
             peak_score=result.trend_score,
@@ -316,6 +370,7 @@ async def _upsert_trend(
 
     trend.name = name
     trend.category = category
+    trend.analysis_mode = analysis_mode
     trend.state = state
     trend.stage = result.stage
     trend.trend_score = result.trend_score
@@ -407,15 +462,32 @@ async def _upsert_trend(
     return trend
 
 
-async def evaluate_trends(session: AsyncSession, *, now: datetime | None = None) -> list[Trend]:
-    """Score every entity and topic that has enough data. Safe to run repeatedly."""
+async def evaluate_trends(
+    session: AsyncSession,
+    *,
+    analysis_mode: str = AnalysisMode.DEMO_INCLUSIVE,
+    now: datetime | None = None,
+) -> list[Trend]:
+    """Score every entity and topic that has enough data. Safe to run repeatedly.
+
+    `analysis_mode` selects which evidence is readable. `live_only` evaluates the
+    same subjects from live series alone and stores the result as its own trend
+    row, leaving the demo-inclusive row untouched.
+    """
     now = now or datetime.now(UTC)
-    by_entity = await _load_series(session)
+    by_entity, excluded = await _load_series(session, analysis_mode=analysis_mode)
     trends: list[Trend] = []
+
+    live_only = analysis_mode == AnalysisMode.LIVE_ONLY
+    exclusion_note = _exclusion_note(excluded) if live_only else None
 
     for _entity_id, bundles in sorted(by_entity.items()):
         entity = bundles[0].entity
+        if live_only and len(bundles) < MIN_LIVE_SERIES:
+            continue
         inp, representative, notes = aggregate(bundles)
+        if exclusion_note:
+            notes.append(exclusion_note)
         headlines = await _headlines(session, {b.source.id for b in bundles})
         if headlines:
             inp.duplication_ratio = duplication_ratio(headlines)
@@ -434,6 +506,7 @@ async def evaluate_trends(session: AsyncSession, *, now: datetime | None = None)
                 result=result,
                 bundles=bundles,
                 extra_warnings=notes,
+                analysis_mode=analysis_mode,
                 now=now,
             )
         )
@@ -451,6 +524,8 @@ async def evaluate_trends(session: AsyncSession, *, now: datetime | None = None)
         if len(bundles) < 2:
             continue
         inp, representative, notes = aggregate(bundles)
+        if exclusion_note:
+            notes.append(exclusion_note)
         headlines = await _headlines(session, {b.source.id for b in bundles})
         if headlines:
             inp.duplication_ratio = duplication_ratio(headlines)
@@ -468,12 +543,36 @@ async def evaluate_trends(session: AsyncSession, *, now: datetime | None = None)
                 result=result,
                 bundles=bundles,
                 extra_warnings=notes,
+                analysis_mode=analysis_mode,
                 now=now,
             )
         )
 
-    log.info("trends_evaluated", count=len(trends))
+    log.info(
+        "trends_evaluated",
+        count=len(trends),
+        analysis_mode=analysis_mode,
+        excluded_sources=len(excluded),
+    )
     return trends
+
+
+def _exclusion_note(excluded: list[ExcludedSource]) -> str | None:
+    """One sentence naming what live-only mode refused, for the trend's warnings.
+
+    Written out rather than counted, because "3 sources excluded" tells a reader
+    nothing about whether the remaining evidence is worth anything.
+    """
+    if not excluded:
+        return None
+    shown = ", ".join(e.slug for e in excluded[:6])
+    more = f" and {len(excluded) - 6} more" if len(excluded) > 6 else ""
+    return (
+        f"Live-only analysis: evidence from {len(excluded)} demo, generator or manually "
+        f"imported source(s) was excluded before any figure on this page was computed "
+        f"({shown}{more}). The demo-inclusive evaluation of the same subject is kept "
+        "separately and reports different numbers."
+    )
 
 
 def _category_for(entity_type: str) -> str:

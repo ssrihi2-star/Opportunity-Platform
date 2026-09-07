@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { Guard } from "@/components/Guard";
-import { Card, ScoreBar, StatusBadge, ValidationBadge, vocab } from "@/components/ui";
+import { AnalysisModeBadge, Card, ScoreBar, StatusBadge, ValidationBadge, vocab } from "@/components/ui";
 import { api } from "@/lib/api";
 import { useApp } from "@/lib/providers";
 import type { Opportunity, Page } from "@/lib/types";
@@ -68,6 +68,11 @@ function Body() {
         </p>
       </Card>
 
+      {/* Stated once at page level, because it is a property of the whole feed
+          rather than of any one card: this surface has no evidence selector, so
+          the reader is told what it reads instead of choosing. */}
+      <p className="text-xs text-[var(--text-muted)]">{t.forYou.liveScope}</p>
+
       <div className="flex flex-wrap items-end gap-4 text-sm">
         <label className="text-xs">
           {t.forYou.minRelevance}
@@ -121,6 +126,9 @@ function OpportunityCard({ row }: { row: Opportunity }) {
             {row.title}
           </Link>
           <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[11px] text-[var(--text-muted)]">
+            {/* Per row as well as per page. Cards get copied, screenshotted and
+                pasted into chats on their own, and the label has to survive that. */}
+            <AnalysisModeBadge mode={row.analysis_mode} />
             <ValidationBadge status={row.validation_status} />
             <span>{vocab(t.opportunities.types, row.opportunity_type)}</span>
             {row.trend_name && <span>· {row.trend_name}</span>}

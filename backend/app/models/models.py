@@ -18,6 +18,7 @@ from app.db.base import (
     UUIDMixin,
 )
 from app.models.enums import (
+    AnalysisMode,
     CapitalFlexibility,
     ConditionCheckState,
     ConditionKind,
@@ -323,6 +324,14 @@ class Trend(UUIDMixin, TimestampMixin, Base):
     entity_id: Mapped[uuid.UUID | None] = mapped_column(sa.ForeignKey("entities.id", ondelete="CASCADE"))
     topic_id: Mapped[uuid.UUID | None] = mapped_column(sa.ForeignKey("topics.id", ondelete="CASCADE"))
 
+    #: Which evidence this row was computed from. Part of the trend's identity,
+    #: not a display flag: a live-only evaluation writes its own row rather than
+    #: overwriting the demo-inclusive one, so a mixed-source score can never be
+    #: relabelled as a live-only score.
+    analysis_mode: Mapped[str] = mapped_column(
+        sa.String(20), default=AnalysisMode.DEMO_INCLUSIVE, index=True
+    )
+
     name: Mapped[str] = mapped_column(sa.String(300), index=True)
     category: Mapped[str | None] = mapped_column(sa.String(40), index=True)
     geo_scope: Mapped[str] = mapped_column(sa.String(20), default="global", index=True)
@@ -357,7 +366,17 @@ class Trend(UUIDMixin, TimestampMixin, Base):
     explanation_model_run_id: Mapped[uuid.UUID | None] = mapped_column(sa.ForeignKey("model_runs.id"))
 
     __table_args__ = (
-        sa.UniqueConstraint("subject_type", "entity_id", "topic_id", "geo_scope", name="ux_trend_subject"),
+        # `analysis_mode` is part of the identity. Without it a live-only run
+        # would update the demo-inclusive row in place, destroying the mixed
+        # result and presenting its history as if it had always been live.
+        sa.UniqueConstraint(
+            "subject_type",
+            "entity_id",
+            "topic_id",
+            "geo_scope",
+            "analysis_mode",
+            name="ux_trend_subject_mode",
+        ),
     )
 
 
@@ -465,6 +484,14 @@ class Opportunity(UUIDMixin, TimestampMixin, Base):
     #: Whether the evidence beneath this came from the live internet, from replayed
     #: fixtures, or from a generated scenario. Shown on every card, without exception.
     validation_status: Mapped[str] = mapped_column(sa.String(20), default=ValidationStatus.DEMO, index=True)
+    #: Which evidence the generating run was allowed to read. Distinct from
+    #: `validation_status`, which describes how far the *adapters* have been
+    #: proven: a live-only candidate on adapters that have never passed the live
+    #: gate is `analysis_mode = live_only` and `validation_status = unvalidated`,
+    #: and both statements are true at once.
+    analysis_mode: Mapped[str] = mapped_column(
+        sa.String(20), default=AnalysisMode.DEMO_INCLUSIVE, index=True
+    )
 
     country: Mapped[str | None] = mapped_column(sa.String(8), index=True)
     industry: Mapped[str | None] = mapped_column(sa.String(60), index=True)

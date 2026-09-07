@@ -17,6 +17,9 @@ class TrendOut(BaseModel):
     name: str
     category: str | None
     geo_scope: str
+    #: Which evidence this evaluation was computed from — "live_only" or
+    #: "demo_inclusive". Every number on the row is only true for that mode.
+    analysis_mode: str
     state: str
     stage: str
     trend_score: float
@@ -42,6 +45,10 @@ class TrendSignalOut(BaseModel):
     signal_id: uuid.UUID
     source_id: uuid.UUID
     source_slug: str | None = None
+    #: True when this series came from a source that actually contacts a live
+    #: upstream. Displayed provenance uses the same rule the engine filtered on,
+    #: so the list under a live-only trend cannot disagree with its score.
+    is_live_source: bool = False
     source_group: str
     signal_type: str
     growth_30d: float | None
@@ -95,6 +102,7 @@ class EvaluateResult(BaseModel):
     evaluated: int
     created: int
     topics: int
+    analysis_mode: str = "demo_inclusive"
     detail: str
 
 
