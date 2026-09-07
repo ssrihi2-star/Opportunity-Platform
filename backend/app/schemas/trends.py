@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator, field_validator
 
 
 class TrendOut(BaseModel):
@@ -175,3 +175,12 @@ class DecisionIn(BaseModel):
 class TopicMembershipIn(BaseModel):
     entity_id: uuid.UUID
     justification: str = Field(min_length=1, max_length=1000)
+
+    @field_validator("justification")
+    @classmethod
+    def strip_and_validate(cls, v: str) -> str:
+        """Strip whitespace and ensure non-empty after stripping."""
+        stripped = v.strip()
+        if not stripped:
+            raise ValueError("justification cannot be blank")
+        return stripped
