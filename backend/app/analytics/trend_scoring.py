@@ -386,7 +386,8 @@ def classify_stage(inp: TrendInput, trend_score: float) -> tuple[str, list[str]]
     growth = inp.growth_30d if inp.growth_30d is not None else inp.growth_90d
 
     if inp.direction == "falling" or (growth is not None and growth < -10):
-        evidence.append(f"Activity is falling ({growth:+.1f}% over the measured window).")
+        growth_str = f"{growth:+.1f}%" if growth is not None else "no measured window"
+        evidence.append(f"Activity is falling ({growth_str} over the measured window).")
         if inp.persistence is not None and inp.persistence <= 0.3:
             evidence.append(f"Only {inp.persistence:.0%} of periods rose.")
         return "declining", evidence

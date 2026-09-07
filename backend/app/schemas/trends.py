@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator, field_validator
 
 
 class TrendOut(BaseModel):
@@ -106,6 +106,17 @@ class EvaluateResult(BaseModel):
     detail: str
 
 
+class TopicEntityOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    entity_id: uuid.UUID
+    entity_name: str
+    entity_type: str
+    weight: float
+    is_manual: bool
+    justification: str | None
+
+
 class TopicOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -117,7 +128,25 @@ class TopicOut(BaseModel):
     first_seen_at: datetime | None
     last_seen_at: datetime | None
     label_is_ai_generated: bool
-    entity_names: list[str] = Field(default_factory=list)
+    entities: list[TopicEntityOut] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _backfill_entity_names(cls, data: Any) -> Any:
+        """Accept the old ``entity_names`` payload during the transition."""
+        if isinstance(data, dict) and "entities" not in data and "entity_names" in data:
+            data["entities"] = [
+                {
+                    "entity_id": None,
+                    "entity_name": name,
+                    "entity_type": "unknown",
+                    "weight": 1.0,
+                    "is_manual": False,
+                    "justification": None,
+                }
+                for name in data["entity_names"]
+            ]
+        return data
 
 
 class MatchCandidateOut(BaseModel):
@@ -141,3 +170,17 @@ class MatchCandidateOut(BaseModel):
 class DecisionIn(BaseModel):
     decision: str = Field(pattern="^(confirmed|rejected|keep_separate)$")
     note: str | None = Field(default=None, max_length=1000)
+
+
+class TopicMembershipIn(BaseModel):
+    entity_id: uuid.UUID
+    justification: str = Field(min_length=1, max_length=1000)
+
+    @field_validator("justification")
+    @classmethod
+    def strip_and_validate(cls, v: str) -> str:
+        """Strip whitespace and ensure non-empty after stripping."""
+        stripped = v.strip()
+        if not stripped:
+            raise ValueError("justification cannot be blank")
+        return stripped

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from typing import Any
 
 import sqlalchemy as sa
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -33,6 +34,8 @@ from app.schemas.trends import (
     EvidenceEvent,
     MatchCandidateOut,
     SnapshotOut,
+    TopicEntityOut,
+    TopicMembershipIn,
     TopicOut,
     TrendDetailOut,
     TrendOut,
@@ -406,21 +409,30 @@ async def list_topics(
     topics = (await session.execute(sa.select(Topic).order_by(Topic.label))).scalars().all()
     out: list[TopicOut] = []
     for topic in topics:
-        names = (
+        rows = (
             (
                 await session.execute(
-                    sa.select(Entity.canonical_name)
+                    sa.select(Entity, TopicEntity.weight, TopicEntity.is_manual, TopicEntity.justification)
                     .join(TopicEntity, TopicEntity.entity_id == Entity.id)
                     .where(TopicEntity.topic_id == topic.id)
                     .order_by(Entity.canonical_name)
                 )
             )
-            .scalars()
             .all()
         )
-        row = TopicOut.model_validate(topic)
-        row.entity_names = list(names)
-        out.append(row)
+        topic_out = TopicOut.model_validate(topic)
+        topic_out.entities = [
+            TopicEntityOut(
+                entity_id=entity.id,
+                entity_name=entity.canonical_name,
+                entity_type=entity.entity_type,
+                weight=weight,
+                is_manual=is_manual,
+                justification=justification,
+            )
+            for entity, weight, is_manual, justification in rows
+        ]
+        out.append(topic_out)
     return out
 
 
@@ -483,3 +495,115 @@ async def decide_match(
     row.candidate_entity_name = entity.canonical_name if entity else None
     row.candidate_external_ids = (entity.external_ids or {}) if entity else {}
     return row
+
+
+# ---------------------------------------------------------------- topic membership
+
+@router.post("/topics/{topic_id}/members", status_code=status.HTTP_201_CREATED)
+async def add_topic_member(
+    topic_id: uuid.UUID,
+    payload: TopicMembershipIn,
+    user: User = Depends(require_admin),
+    session: AsyncSession = Depends(db_session),
+) -> dict[str, Any]:
+    """Add an entity to a topic manually. Requires admin role."""
+    topic = await session.get(Topic, topic_id)
+    if not topic:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Topic not found.")
+    entity = await session.get(Entity, payload.entity_id)
+    if not entity:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Entity not found.")
+    # Check if membership already exists
+    existing = (
+        await session.execute(
+            sa.select(TopicEntity).where(
+                TopicEntity.topic_id == topic_id, TopicEntity.entity_id == payload.entity_id
+            )
+        )
+    ).scalar_one_or_none()
+    if existing:
+        if existing.is_manual:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "This entity is already a manual member of this topic.",
+            )
+        # Upgrade automatic membership to manual
+        existing.is_manual = True
+        existing.justification = payload.justification
+        session.add(
+            SystemAuditLog(
+                actor_user_id=user.id,
+                actor_label=user.email,
+                action="topic.membership_added",
+                object_type="topic",
+                object_id=str(topic_id),
+                after={
+                    "entity_id": str(payload.entity_id),
+                    "entity_name": entity.canonical_name,
+                    "justification": payload.justification,
+                    "upgraded_from_automatic": True,
+                },
+            )
+        )
+    else:
+        # Create new manual membership
+        membership = TopicEntity(
+            topic_id=topic_id,
+            entity_id=payload.entity_id,
+            weight=1.0,
+            is_manual=True,
+            justification=payload.justification,
+        )
+        session.add(membership)
+        session.add(
+            SystemAuditLog(
+                actor_user_id=user.id,
+                actor_label=user.email,
+                action="topic.membership_added",
+                object_type="topic",
+                object_id=str(topic_id),
+                after={
+                    "entity_id": str(payload.entity_id),
+                    "entity_name": entity.canonical_name,
+                    "justification": payload.justification,
+                },
+            )
+        )
+    await session.flush()
+    return {"status": "ok", "entity_id": str(payload.entity_id), "entity_name": entity.canonical_name}
+
+
+@router.delete("/topics/{topic_id}/members/{entity_id}")
+async def remove_topic_member(
+    topic_id: uuid.UUID,
+    entity_id: uuid.UUID,
+    user: User = Depends(require_admin),
+    session: AsyncSession = Depends(db_session),
+) -> dict[str, Any]:
+    """Remove an entity from a topic manually. Requires admin role."""
+    membership = (
+        await session.execute(
+            sa.select(TopicEntity).where(TopicEntity.topic_id == topic_id, TopicEntity.entity_id == entity_id)
+        )
+    ).scalar_one_or_none()
+    if not membership:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Membership not found.")
+    entity = await session.get(Entity, entity_id)
+    session.add(
+        SystemAuditLog(
+            actor_user_id=user.id,
+            actor_label=user.email,
+            action="topic.membership_removed",
+            object_type="topic",
+            object_id=str(topic_id),
+            before={
+                "entity_id": str(entity_id),
+                "entity_name": entity.canonical_name if entity else None,
+                "was_manual": membership.is_manual,
+                "justification": membership.justification,
+            },
+        )
+    )
+    await session.delete(membership)
+    await session.flush()
+    return {"status": "ok", "entity_id": str(entity_id)}

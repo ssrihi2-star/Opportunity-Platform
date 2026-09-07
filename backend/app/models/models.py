@@ -256,6 +256,8 @@ class TopicEntity(UUIDMixin, CreatedAtMixin, Base):
     topic_id: Mapped[uuid.UUID] = mapped_column(sa.ForeignKey("topics.id", ondelete="CASCADE"))
     entity_id: Mapped[uuid.UUID] = mapped_column(sa.ForeignKey("entities.id", ondelete="CASCADE"))
     weight: Mapped[float] = mapped_column(sa.Float, default=1.0)
+    is_manual: Mapped[bool] = mapped_column(sa.Boolean, default=False)
+    justification: Mapped[str | None] = mapped_column(sa.Text, nullable=True)
 
     __table_args__ = (sa.UniqueConstraint("topic_id", "entity_id", name="ux_topic_entity"),)
 

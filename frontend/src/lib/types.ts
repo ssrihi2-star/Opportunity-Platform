@@ -273,6 +273,15 @@ export type MatchCandidate = {
   created_at: string;
 };
 
+export type TopicEntity = {
+  entity_id: string;
+  entity_name: string;
+  entity_type: string;
+  weight: number;
+  is_manual: boolean;
+  justification: string | null;
+};
+
 export type Topic = {
   id: string;
   label: string;
@@ -282,7 +291,7 @@ export type Topic = {
   first_seen_at: string | null;
   last_seen_at: string | null;
   label_is_ai_generated: boolean;
-  entity_names: string[];
+  entities: TopicEntity[];
 };
 
 // ------------------------------------------------------------------ phase 4
