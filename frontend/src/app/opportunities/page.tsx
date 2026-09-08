@@ -285,17 +285,119 @@ function Body() {
           <p className="mt-1 text-xs text-[var(--text-secondary)]">
             {t.opportunities.refusedNote}
           </p>
-          <ul className="mt-3 space-y-2 text-sm">
+          <div className="mt-4 space-y-4">
             {result.rejections.map((r, i) => (
-              <li key={`${r.trend_id}-${r.opportunity_type}-${i}`}>
-                <span className="font-medium">{r.trend_name}</span>{" "}
-                <span className="text-xs text-[var(--text-muted)]">
-                  [{vocab(t.opportunities.types, r.opportunity_type)}]
-                </span>
-                <div className="text-xs text-[var(--text-secondary)]">{r.reasons[0]}</div>
-              </li>
+              <div
+                key={`${r.trend_id}-${r.opportunity_type}-${i}`}
+                className="rounded-lg border border-[var(--border)] bg-[var(--surface-variant)] p-4"
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div className="flex-1">
+                    <div className="flex items-center gap-2">
+                      <StatusBadge status={r.trend_state} />
+                      <h3 className="text-sm font-semibold">{r.trend_name}</h3>
+                      <span className="rounded bg-[var(--surface-muted)] px-2 py-0.5 text-xs text-[var(--text-secondary)]">
+                        {t.opportunities.researchBrief}
+                      </span>
+                    </div>
+                    <div className="mt-1 text-xs text-[var(--text-muted)]">
+                      [{vocab(t.opportunities.types, r.opportunity_type)}]
+                    </div>
+                  </div>
+                  <a
+                    href={`/trends/${r.trend_id}`}
+                    className="rounded border border-[var(--border)] px-3 py-1 text-xs hover:bg-[var(--surface-muted)]"
+                  >
+                    {t.opportunities.viewTrendDetail}
+                  </a>
+                </div>
+
+                <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2 text-xs">
+                  <div>
+                    <span className="text-[var(--text-muted)]">{t.opportunities.trendScore}: </span>
+                    <span className="font-medium">{r.trend_score.toFixed(1)}</span>
+                  </div>
+                  <div>
+                    <span className="text-[var(--text-muted)]">{t.opportunities.confidence}: </span>
+                    <span className="font-medium">{r.trend_confidence.toFixed(1)}</span>
+                  </div>
+                  <div>
+                    <span className="text-[var(--text-muted)]">
+                      {t.opportunities.signalTypes}:{" "}
+                    </span>
+                    <span className="font-medium">{r.distinct_signal_types}</span>
+                  </div>
+                  <div>
+                    <span className="text-[var(--text-muted)]">{t.opportunities.sources}: </span>
+                    <span className="font-medium">{r.independent_source_count}</span>
+                  </div>
+                  <div>
+                    <span className="text-[var(--text-muted)]">
+                      {t.opportunities.observations}:{" "}
+                    </span>
+                    <span className="font-medium">{r.observation_count}</span>
+                  </div>
+                  <div>
+                    <span className="text-[var(--text-muted)]">
+                      {t.opportunities.historyDays}:{" "}
+                    </span>
+                    <span className="font-medium">{r.history_days}</span>
+                  </div>
+                </div>
+
+                <div className="mt-3">
+                  <div className="text-xs font-medium text-[var(--text-muted)]">
+                    {t.opportunities.observedChange}
+                  </div>
+                  <div className="mt-1 text-xs">
+                    <StatusBadge status={r.direction === "rising" ? "rising" : r.direction === "declining" ? "declining" : "flat"} />
+                    <span className="ml-2">
+                      {r.direction === "rising"
+                        ? t.opportunities.directionRising
+                        : r.direction === "declining"
+                          ? t.opportunities.directionDeclining
+                          : r.direction === "flat"
+                            ? t.opportunities.directionFlat
+                            : t.opportunities.directionUnknown}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="mt-3">
+                  <div className="text-xs font-medium text-[var(--text-muted)]">
+                    {t.opportunities.evidencePresent}
+                  </div>
+                  {r.evidence_summary.length > 0 ? (
+                    <div className="mt-1 flex flex-wrap gap-1">
+                      {r.evidence_summary.map((ev, j) => (
+                        <span
+                          key={j}
+                          className="rounded bg-[var(--surface-muted)] px-2 py-0.5 text-xs"
+                        >
+                          {ev.label} ({ev.count})
+                        </span>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="mt-1 text-xs text-[var(--text-secondary)]">
+                      {t.opportunities.noEvidenceSummary}
+                    </div>
+                  )}
+                </div>
+
+                <div className="mt-3">
+                  <div className="text-xs font-medium text-[var(--text-muted)]">
+                    {t.opportunities.evidenceMissing}
+                  </div>
+                  <ul className="mt-1 space-y-1 text-xs text-[var(--text-secondary)]">
+                    {r.reasons.map((reason, j) => (
+                      <li key={j}>• {reason}</li>
+                    ))}
+                  </ul>
+                </div>
+              </div>
             ))}
-          </ul>
+          </div>
         </Card>
       )}
     </>

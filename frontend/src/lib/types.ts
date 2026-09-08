@@ -458,7 +458,22 @@ export type GenerateResult = {
   /** A live-only run that produced nothing because eligible live evidence was too thin. */
   insufficient_live_evidence: boolean;
   detail: string | null;
-  rejections: { trend_id: string; trend_name: string; opportunity_type: string; reasons: string[] }[];
+  rejections: {
+    trend_id: string;
+    trend_name: string;
+    opportunity_type: string;
+    reasons: string[];
+    trend_score: number;
+    trend_confidence: number;
+    trend_state: string;
+    trend_stage: string;
+    observation_count: number;
+    history_days: number;
+    distinct_signal_types: number;
+    independent_source_count: number;
+    direction: string;
+    evidence_summary: { label: string; count: number; class: string }[];
+  }[];
 };
 
 // ------------------------------------------------------------------ phase 5
