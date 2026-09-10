@@ -300,6 +300,20 @@ export const messages = {
       directionFlat: "Flat",
       directionDeclining: "Declining",
       directionNotMeasured: "Change has not been measured",
+      // The trend-level growth figures are a WEIGHTED AVERAGE across the trend's
+      // signal series (services/trends.py::aggregate). They are not a reading of
+      // any one series, and nothing here measures money.
+      changeIsAverage: "Weighted average across signals",
+      // Deliberately a statement about what data exists, not about what fed the
+      // average. `_weighted` also skips zero-weight series, and nothing in this
+      // payload says which those are — so we do not claim these series
+      // contributed, only that they have a measured change.
+      changeCoverage: "{covered} of {total} series have a measured 30-day change.",
+      changeMixedKinds:
+        "These series count different things — mentions, page views, repository activity, filings. Averaging them gives a blended figure, not sales, revenue or price.",
+      changeAverageTag: "avg",
+      perSeriesChange: "Change per series (30 days)",
+      seriesChangeNotMeasured: "not measured",
       signalTypes: "Signal types",
       observations: "Observations",
       historyDays: "Days observed",
@@ -840,6 +854,13 @@ export const messages = {
       directionFlat: "مستقر",
       directionDeclining: "متراجع",
       directionNotMeasured: "لم يتم قياس التغير",
+      changeIsAverage: "متوسط مرجّح عبر الإشارات",
+      changeCoverage: "{covered} من {total} سلاسل لديها تغير مقيس خلال 30 يومًا.",
+      changeMixedKinds:
+        "هذه السلاسل تحصي أشياء مختلفة — الإشارات، مشاهدات الصفحات، نشاط المستودعات، الإيداعات. متوسطها رقم مركّب، وليس مبيعات أو إيرادات أو سعرًا.",
+      changeAverageTag: "متوسط",
+      perSeriesChange: "التغير لكل سلسلة (30 يومًا)",
+      seriesChangeNotMeasured: "غير مقيس",
       signalTypes: "أنواع الإشارات",
       observations: "الملاحظات",
       historyDays: "أيام الرصد",

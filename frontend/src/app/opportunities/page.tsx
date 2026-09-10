@@ -381,19 +381,48 @@ function Body() {
                                 : t.opportunities.directionFlat
                           }
                         />
-                        {/* Show measurement details if available */}
+                        {/* Every figure here is a WEIGHTED AVERAGE across the trend's
+                            signal series, so it is labelled as one. A bare "+58.9%"
+                            reads as a measurement of something, and there is no single
+                            series it corresponds to. The per-series figures below say
+                            what was actually measured. */}
                         {Object.keys(r.growth_metrics).length > 0 && (
-                          <div className="ml-4 text-xs text-[var(--text-secondary)]">
+                          <div className="ms-4 text-xs text-[var(--text-secondary)]">
+                            <div className="font-medium">{t.opportunities.changeIsAverage}</div>
                             {Object.entries(r.growth_metrics).map(([period, value]) => {
                               const periodLabel = period.replace("growth_", "");
                               const sign = value > 0 ? "+" : "";
                               return (
                                 <div key={period}>
                                   {periodLabel}: {sign}
-                                  {value.toFixed(1)}%
+                                  {value.toFixed(1)}%{" "}
+                                  <span className="text-[var(--text-muted)]">
+                                    ({t.opportunities.changeAverageTag})
+                                  </span>
                                 </div>
                               );
                             })}
+                            {/* A count of what data EXISTS, not of what fed the average.
+                                `_weighted` also skips zero-weight series and this payload
+                                cannot say which those are, so claiming these series
+                                contributed would overstate it. Stated for 30 days only:
+                                evidence_summary carries growth_30d and nothing else. */}
+                            {r.evidence_summary.length > 0 && (
+                              <div className="mt-1">
+                                {t.opportunities.changeCoverage
+                                  .replace(
+                                    "{covered}",
+                                    String(
+                                      r.evidence_summary.filter((ev) => ev.growth_30d !== null)
+                                        .length
+                                    )
+                                  )
+                                  .replace("{total}", String(r.evidence_summary.length))}
+                              </div>
+                            )}
+                            <div className="mt-1 text-[var(--text-muted)]">
+                              {t.opportunities.changeMixedKinds}
+                            </div>
                           </div>
                         )}
                       </div>
@@ -406,15 +435,31 @@ function Body() {
                     {t.opportunities.evidencePresent}
                   </div>
                   {r.evidence_summary.length > 0 ? (
-                    <div className="mt-1 flex flex-wrap gap-1">
+                    <div className="mt-1 space-y-1">
+                      <div className="text-[11px] text-[var(--text-muted)]">
+                        {t.opportunities.perSeriesChange}
+                      </div>
                       {r.evidence_summary.map((ev, j) => (
-                        <span
+                        <div
                           key={j}
                           className="rounded bg-[var(--surface-muted)] px-2 py-0.5 text-xs"
                           title={`${ev.signal_type} (${ev.signal_class}) from ${ev.source_group}: ${ev.observation_count} observations`}
                         >
                           {ev.signal_type} ({ev.observation_count}, {ev.source_group})
-                        </span>
+                          {" — "}
+                          {/* A series with no measured change shows the words, never a
+                              0% and never a bare dash: absence must not read as zero. */}
+                          {ev.growth_30d === null ? (
+                            <span className="text-[var(--text-muted)]">
+                              {t.opportunities.seriesChangeNotMeasured}
+                            </span>
+                          ) : (
+                            <span>
+                              {ev.growth_30d > 0 ? "+" : ""}
+                              {ev.growth_30d.toFixed(1)}%
+                            </span>
+                          )}
+                        </div>
                       ))}
                     </div>
                   ) : (
