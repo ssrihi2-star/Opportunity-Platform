@@ -207,6 +207,19 @@ class RejectionOut(BaseModel):
     trend_name: str
     opportunity_type: str
     reasons: list[str]
+    # Research brief fields
+    trend_score: float = 0.0
+    trend_confidence: float = 0.0
+    trend_state: str = "candidate"
+    trend_stage: str = "weak_signal"
+    observation_count: int = 0
+    history_days: int = 0
+    distinct_signal_types: int = 0
+    independent_source_count: int = 0
+    direction: str = "unknown"  # rising, flat, declining, unknown
+    growth_metrics: dict[str, float] = {}
+    is_spike: bool = False
+    evidence_summary: list[dict[str, Any]] = []
 
 
 class GenerateResult(BaseModel):

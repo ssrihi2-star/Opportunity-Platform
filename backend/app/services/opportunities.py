@@ -79,6 +79,11 @@ log = get_logger("opportunities")
 WEAK_BUT_INFORMATIVE_TREND = 40.0
 WEAK_BUT_INFORMATIVE_COMPLETENESS = 0.5
 
+# Presentation cutoffs for direction labels (rising/flat/declining).
+# Not a scored quantity — only determines how we label observed growth.
+DIRECTION_RISING_THRESHOLD = 5.0
+DIRECTION_DECLINING_THRESHOLD = -5.0
+
 
 @dataclass(slots=True)
 class Rejection:
@@ -88,6 +93,19 @@ class Rejection:
     trend_name: str
     opportunity_type: str
     reasons: list[str]
+    # Research brief fields - assembled from data already computed
+    trend_score: float = 0.0
+    trend_confidence: float = 0.0
+    trend_state: str = "candidate"
+    trend_stage: str = "weak_signal"
+    observation_count: int = 0
+    history_days: int = 0
+    distinct_signal_types: int = 0
+    independent_source_count: int = 0
+    direction: str = "unknown"  # rising, flat, declining, unknown
+    growth_metrics: dict[str, float] = field(default_factory=dict)
+    is_spike: bool = False
+    evidence_summary: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -254,11 +272,13 @@ async def evaluate_one(
     # 1. The gate. Most trends stop here, and that is the design.
     gate = check_gate(inp)
     if not gate.passed:
+        brief = _build_rejection_brief(trend, facts, gate.reasons)
         return None, Rejection(
             trend_id=str(trend.id),
             trend_name=trend.name,
             opportunity_type=opportunity_type,
             reasons=gate.reasons,
+            **brief,
         )
 
     # 2. The type-specific analyzer enriches and flags.
@@ -337,15 +357,18 @@ async def evaluate_one(
     # refusal silently stopped firing while every test but one still passed.
     inaccessible, why_closed = accessibility_verdict(inp)
     if inaccessible:
+        reasons = [
+            "The trend is real, but there is no accessible way to take part: "
+            + why_closed
+            + ". Recorded as a trend to watch rather than as an opportunity."
+        ]
+        brief = _build_rejection_brief(trend, facts, reasons)
         return None, Rejection(
             trend_id=str(trend.id),
             trend_name=trend.name,
             opportunity_type=opportunity_type,
-            reasons=[
-                "The trend is real, but there is no accessible way to take part: "
-                + why_closed
-                + ". Recorded as a trend to watch rather than as an opportunity."
-            ],
+            reasons=reasons,
+            **brief,
         )
 
     # 7b. Floors. A candidate nobody can trust, or that is barely above nothing,
@@ -363,16 +386,19 @@ async def evaluate_one(
             and completeness >= WEAK_BUT_INFORMATIVE_COMPLETENESS
         )
         if not informed_negative:
+            reasons = [
+                f"Opportunity score of {score.opportunity_score:.0f} is below the minimum "
+                f"of {GATE['min_opportunity_score']:.0f}, and the evidence was too "
+                f"incomplete ({completeness:.0%}) to call it a considered negative. "
+                f"Weakest area: {_weakest(score)}."
+            ]
+            brief = _build_rejection_brief(trend, facts, reasons)
             return None, Rejection(
                 trend_id=str(trend.id),
                 trend_name=trend.name,
                 opportunity_type=opportunity_type,
-                reasons=[
-                    f"Opportunity score of {score.opportunity_score:.0f} is below the minimum "
-                    f"of {GATE['min_opportunity_score']:.0f}, and the evidence was too "
-                    f"incomplete ({completeness:.0%}) to call it a considered negative. "
-                    f"Weakest area: {_weakest(score)}."
-                ],
+                reasons=reasons,
+                **brief,
             )
         score.warnings.insert(
             0,
@@ -382,15 +408,18 @@ async def evaluate_one(
         )
 
     if confidence < GATE["min_confidence"]:
+        reasons = [
+            f"Confidence of {confidence:.0f} after the skeptic pass is below the "
+            f"minimum of {GATE['min_confidence']:.0f}. "
+            f"Strongest objection: {skeptic.strongest_counterargument}"
+        ]
+        brief = _build_rejection_brief(trend, facts, reasons)
         return None, Rejection(
             trend_id=str(trend.id),
             trend_name=trend.name,
             opportunity_type=opportunity_type,
-            reasons=[
-                f"Confidence of {confidence:.0f} after the skeptic pass is below the "
-                f"minimum of {GATE['min_confidence']:.0f}. "
-                f"Strongest objection: {skeptic.strongest_counterargument}"
-            ],
+            reasons=reasons,
+            **brief,
         )
 
     opp = await _upsert(
@@ -423,6 +452,59 @@ def _weakest(score: Any) -> str:
         key=lambda kv: kv[1]["points"] / max(1, kv[1]["max"]),
     )
     return f"{worst[0].replace('_', ' ')} scored {worst[1]['points']:.1f}/{worst[1]['max']}"
+
+
+def _build_rejection_brief(trend: Trend, facts: list[EvidenceFact], reasons: list[str]) -> dict[str, Any]:
+    """Assemble research brief fields from data already computed.
+    
+    Returns a dict with keys matching Rejection dataclass fields.
+    """
+    # Derive direction from growth metrics.
+    # Unknown when metrics are absent, growth_30d is missing, or its value is None.
+    metrics = trend.metrics or {}
+    growth_30d = metrics.get("growth_30d")
+    
+    # Extract all available growth metrics for display
+    growth_metrics = {}
+    for key in ["growth_7d", "growth_14d", "growth_30d", "growth_90d"]:
+        value = metrics.get(key)
+        if value is not None:
+            growth_metrics[key] = value
+    
+    if growth_30d is None:
+        direction = "unknown"
+    elif growth_30d > DIRECTION_RISING_THRESHOLD:
+        direction = "rising"
+    elif growth_30d < DIRECTION_DECLINING_THRESHOLD:
+        direction = "declining"
+    else:
+        direction = "flat"
+    
+    # Build evidence summary from facts
+    evidence_summary = []
+    for fact in facts:
+        evidence_summary.append({
+            "signal_type": fact.signal_type,
+            "signal_class": fact.signal_class,
+            "source_group": fact.source_group,
+            "observation_count": fact.observation_count,
+            "growth_30d": fact.growth_30d,
+        })
+    
+    return {
+        "trend_score": trend.trend_score,
+        "trend_confidence": trend.confidence,
+        "trend_state": trend.state,
+        "trend_stage": trend.stage,
+        "observation_count": trend.observation_count,
+        "history_days": trend.history_days,
+        "distinct_signal_types": trend.distinct_signal_types,
+        "independent_source_count": trend.independent_source_count,
+        "direction": direction,
+        "growth_metrics": growth_metrics,
+        "is_spike": trend.is_spike,
+        "evidence_summary": evidence_summary,
+    }
 
 
 def _completeness(inp: OpportunityInput, analyzer: Any) -> float:

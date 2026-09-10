@@ -288,9 +288,39 @@ export const messages = {
       filterRisk: "Risk",
       filterState: "Status",
       all: "All",
-      refused: "Trends that did not become opportunities",
+      refused: "Research briefs: Trends that did not become opportunities",
       refusedNote:
-        "A trend is not an opportunity. These passed the trend engine and were refused here, with the reason.",
+        "These trends were observed and tracked but did not qualify as opportunities. Each brief shows what was observed, what evidence exists, and what is missing. No business potential is implied.",
+      researchBrief: "Research Brief",
+      observedChange: "Observed change",
+      evidencePresent: "Evidence present",
+      evidenceMissing: "Evidence missing",
+      viewTrendDetail: "View trend detail",
+      directionRising: "Rising",
+      directionFlat: "Flat",
+      directionDeclining: "Declining",
+      directionNotMeasured: "Change has not been measured",
+      // The trend-level growth figures are a WEIGHTED AVERAGE across the trend's
+      // signal series (services/trends.py::aggregate). They are not a reading of
+      // any one series, and nothing here measures money.
+      changeIsAverage: "Weighted average across signals",
+      // Deliberately a statement about what data exists, not about what fed the
+      // average. `_weighted` also skips zero-weight series, and nothing in this
+      // payload says which those are — so we do not claim these series
+      // contributed, only that they have a measured change.
+      changeCoverage: "{covered} of {total} series have a measured 30-day change.",
+      changeMixedKinds:
+        "These series count different things — mentions, page views, repository activity, filings. Averaging them gives a blended figure, not sales, revenue or price.",
+      changeAverageTag: "avg",
+      perSeriesChange: "Change per series (30 days)",
+      seriesChangeNotMeasured: "not measured",
+      signalTypes: "Signal types",
+      observations: "Observations",
+      historyDays: "Days observed",
+      noEvidenceSummary: "No evidence classes recorded",
+      spikeWarning: "Single-day spike",
+      spikeDescription:
+        "The trend has many observations in its history, but the recent movement rests on a single day. The total observation count and the evidence behind the flagged change are different things.",
       whyDetected: "Why it was detected",
       whatMakesInteresting: "What makes it interesting",
       whyEarly: "Why it may still be early",
@@ -812,8 +842,32 @@ export const messages = {
       filterRisk: "المخاطر",
       filterState: "الحالة",
       all: "الكل",
-      refused: "اتجاهات لم تتحول إلى فرص",
-      refusedNote: "الاتجاه ليس فرصة. هذه اجتازت محرك الاتجاهات ورُفضت هنا، مع السبب.",
+      refused: "ملخصات بحثية: اتجاهات لم تتحول إلى فرص",
+      refusedNote:
+        "هذه الاتجاهات تم رصدها وتتبعها لكنها لم تكن مؤهلة كفرص. كل ملخص يوضح ما تم رصده، وما الأدلة الموجودة، وما الناقص. لا يُستنتج أي إمكانات تجارية.",
+      researchBrief: "ملخص بحثي",
+      observedChange: "التغير الملاحظ",
+      evidencePresent: "الأدلة الموجودة",
+      evidenceMissing: "الأدلة الناقصة",
+      viewTrendDetail: "عرض تفاصيل الاتجاه",
+      directionRising: "صاعد",
+      directionFlat: "مستقر",
+      directionDeclining: "متراجع",
+      directionNotMeasured: "لم يتم قياس التغير",
+      changeIsAverage: "متوسط مرجّح عبر الإشارات",
+      changeCoverage: "{covered} من {total} سلاسل لديها تغير مقيس خلال 30 يومًا.",
+      changeMixedKinds:
+        "هذه السلاسل تحصي أشياء مختلفة — الإشارات، مشاهدات الصفحات، نشاط المستودعات، الإيداعات. متوسطها رقم مركّب، وليس مبيعات أو إيرادات أو سعرًا.",
+      changeAverageTag: "متوسط",
+      perSeriesChange: "التغير لكل سلسلة (30 يومًا)",
+      seriesChangeNotMeasured: "غير مقيس",
+      signalTypes: "أنواع الإشارات",
+      observations: "الملاحظات",
+      historyDays: "أيام الرصد",
+      noEvidenceSummary: "لم يتم تسجيل فئات أدلة",
+      spikeWarning: "ارتفاع مفاجئ في يوم واحد",
+      spikeDescription:
+        "للاتجاه العديد من الملاحظات في تاريخه، لكن الحركة الأخيرة تستند إلى يوم واحد. عدد الملاحظات الإجمالي والأدلة وراء التغيير المُشار إليه هما شيئان مختلفان.",
       whyDetected: "سبب الرصد",
       whatMakesInteresting: "ما الذي يجعلها مثيرة للاهتمام",
       whyEarly: "لماذا قد تكون مبكرة",

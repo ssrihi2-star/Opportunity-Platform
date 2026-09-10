@@ -492,6 +492,18 @@ async def run_generation(
                 trend_name=r.trend_name,
                 opportunity_type=r.opportunity_type,
                 reasons=r.reasons,
+                trend_score=r.trend_score,
+                trend_confidence=r.trend_confidence,
+                trend_state=r.trend_state,
+                trend_stage=r.trend_stage,
+                observation_count=r.observation_count,
+                history_days=r.history_days,
+                distinct_signal_types=r.distinct_signal_types,
+                independent_source_count=r.independent_source_count,
+                direction=r.direction,
+                growth_metrics=r.growth_metrics,
+                is_spike=r.is_spike,
+                evidence_summary=r.evidence_summary,
             )
             for r in result.rejections
         ],
