@@ -345,21 +345,59 @@ function Body() {
                   </div>
                 </div>
 
+                {r.is_spike && (
+                  <div className="mt-3 rounded border border-[var(--border-warning)] bg-[var(--surface-warning)] p-2 text-xs">
+                    <div className="font-medium text-[var(--text-warning)]">
+                      {t.opportunities.spikeWarning}
+                    </div>
+                    <div className="mt-1 text-[var(--text-secondary)]">
+                      {t.opportunities.spikeDescription}
+                    </div>
+                  </div>
+                )}
+
                 <div className="mt-3">
                   <div className="text-xs font-medium text-[var(--text-muted)]">
                     {t.opportunities.observedChange}
                   </div>
                   <div className="mt-1 text-xs">
-                    <StatusBadge status={r.direction === "rising" ? "rising" : r.direction === "declining" ? "declining" : "flat"} />
-                    <span className="ml-2">
-                      {r.direction === "rising"
-                        ? t.opportunities.directionRising
-                        : r.direction === "declining"
-                          ? t.opportunities.directionDeclining
-                          : r.direction === "flat"
-                            ? t.opportunities.directionFlat
-                            : t.opportunities.directionUnknown}
-                    </span>
+                    {r.direction === "unknown" ? (
+                      <span>{t.opportunities.directionNotMeasured}</span>
+                    ) : (
+                      <div className="space-y-1">
+                        <StatusBadge
+                          status={
+                            r.direction === "rising"
+                              ? "rising"
+                              : r.direction === "declining"
+                                ? "declining"
+                                : "flat"
+                          }
+                          label={
+                            r.direction === "rising"
+                              ? t.opportunities.directionRising
+                              : r.direction === "declining"
+                                ? t.opportunities.directionDeclining
+                                : t.opportunities.directionFlat
+                          }
+                        />
+                        {/* Show measurement details if available */}
+                        {Object.keys(r.growth_metrics).length > 0 && (
+                          <div className="ml-4 text-xs text-[var(--text-secondary)]">
+                            {Object.entries(r.growth_metrics).map(([period, value]) => {
+                              const periodLabel = period.replace("growth_", "");
+                              const sign = value > 0 ? "+" : "";
+                              return (
+                                <div key={period}>
+                                  {periodLabel}: {sign}
+                                  {value.toFixed(1)}%
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
                 </div>
 
@@ -373,8 +411,9 @@ function Body() {
                         <span
                           key={j}
                           className="rounded bg-[var(--surface-muted)] px-2 py-0.5 text-xs"
+                          title={`${ev.signal_type} (${ev.signal_class}) from ${ev.source_group}: ${ev.observation_count} observations`}
                         >
-                          {ev.label} ({ev.count})
+                          {ev.signal_type} ({ev.observation_count}, {ev.source_group})
                         </span>
                       ))}
                     </div>

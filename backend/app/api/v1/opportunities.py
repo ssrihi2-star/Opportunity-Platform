@@ -501,6 +501,8 @@ async def run_generation(
                 distinct_signal_types=r.distinct_signal_types,
                 independent_source_count=r.independent_source_count,
                 direction=r.direction,
+                growth_metrics=r.growth_metrics,
+                is_spike=r.is_spike,
                 evidence_summary=r.evidence_summary,
             )
             for r in result.rejections

@@ -79,6 +79,11 @@ log = get_logger("opportunities")
 WEAK_BUT_INFORMATIVE_TREND = 40.0
 WEAK_BUT_INFORMATIVE_COMPLETENESS = 0.5
 
+# Presentation cutoffs for direction labels (rising/flat/declining).
+# Not a scored quantity — only determines how we label observed growth.
+DIRECTION_RISING_THRESHOLD = 5.0
+DIRECTION_DECLINING_THRESHOLD = -5.0
+
 
 @dataclass(slots=True)
 class Rejection:
@@ -98,6 +103,8 @@ class Rejection:
     distinct_signal_types: int = 0
     independent_source_count: int = 0
     direction: str = "unknown"  # rising, flat, declining, unknown
+    growth_metrics: dict[str, float] = field(default_factory=dict)
+    is_spike: bool = False
     evidence_summary: list[dict[str, Any]] = field(default_factory=list)
 
 
@@ -452,14 +459,23 @@ def _build_rejection_brief(trend: Trend, facts: list[EvidenceFact], reasons: lis
     
     Returns a dict with keys matching Rejection dataclass fields.
     """
-    # Derive direction from growth metrics
-    # trend.metrics contains growth_30d, acceleration, etc. from trend_scoring
-    growth_30d = trend.metrics.get("growth_30d")
+    # Derive direction from growth metrics.
+    # Unknown when metrics are absent, growth_30d is missing, or its value is None.
+    metrics = trend.metrics or {}
+    growth_30d = metrics.get("growth_30d")
+    
+    # Extract all available growth metrics for display
+    growth_metrics = {}
+    for key in ["growth_7d", "growth_14d", "growth_30d", "growth_90d"]:
+        value = metrics.get(key)
+        if value is not None:
+            growth_metrics[key] = value
+    
     if growth_30d is None:
         direction = "unknown"
-    elif growth_30d > 5.0:
+    elif growth_30d > DIRECTION_RISING_THRESHOLD:
         direction = "rising"
-    elif growth_30d < -5.0:
+    elif growth_30d < DIRECTION_DECLINING_THRESHOLD:
         direction = "declining"
     else:
         direction = "flat"
@@ -485,6 +501,8 @@ def _build_rejection_brief(trend: Trend, facts: list[EvidenceFact], reasons: lis
         "distinct_signal_types": trend.distinct_signal_types,
         "independent_source_count": trend.independent_source_count,
         "direction": direction,
+        "growth_metrics": growth_metrics,
+        "is_spike": trend.is_spike,
         "evidence_summary": evidence_summary,
     }
 

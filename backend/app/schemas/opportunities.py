@@ -217,6 +217,8 @@ class RejectionOut(BaseModel):
     distinct_signal_types: int = 0
     independent_source_count: int = 0
     direction: str = "unknown"  # rising, flat, declining, unknown
+    growth_metrics: dict[str, float] = {}
+    is_spike: bool = False
     evidence_summary: list[dict[str, Any]] = []
 
 

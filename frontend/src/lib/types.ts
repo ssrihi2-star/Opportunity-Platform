@@ -472,7 +472,15 @@ export type GenerateResult = {
     distinct_signal_types: number;
     independent_source_count: number;
     direction: string;
-    evidence_summary: { label: string; count: number; class: string }[];
+    growth_metrics: { [key: string]: number };
+    is_spike: boolean;
+    evidence_summary: {
+      signal_type: string;
+      signal_class: string;
+      source_group: string;
+      observation_count: number;
+      growth_30d: number | null;
+    }[];
   }[];
 };
 
